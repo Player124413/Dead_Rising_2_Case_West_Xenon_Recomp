@@ -56,6 +56,15 @@ echo "==> configuring"
 # desktop OpenCL, and configure would happily use all three to produce a library that cannot be
 # loaded on a phone. What comes out is checked below rather than trusted.
 #
+# --enable-pic IS LOAD-BEARING AND NOT THE DEFAULT. ffmpeg turns PIC on by itself only when it is
+# building shared libraries (`enabled shared && enable pic` in its configure), and this build is
+# --enable-static --disable-shared — so without the flag the objects come out non-PIC and the
+# failure arrives at the FINAL LINK of libcw_runtime.so, twenty minutes of cross-compiling later,
+# as a wall of relocation errors naming ffmpeg objects and saying nothing about a flag. The
+# desktop script does not need it because it builds --enable-shared. Verified below against
+# configure's own config.mak rather than against the flag we passed (gotcha 401: passing a flag
+# and believing it is not the same as checking it took).
+#
 # The assembly flags are per-architecture, and getting them wrong is a configure failure that
 # names a flag rather than a platform:
 #
@@ -74,6 +83,7 @@ esac
 "$SRC/configure" \
     --prefix="$PREFIX" \
     --enable-static --disable-shared \
+    --enable-pic \
     --enable-cross-compile \
     --target-os=android \
     --arch="$ARCH" \
@@ -94,6 +104,16 @@ esac
     --enable-decoder=xma1,xma2 \
     --disable-gpl --disable-nonfree --disable-version3 \
     >"$BUILD/configure.log" 2>&1 || { tail -40 "$BUILD/configure.log"; exit 1; }
+
+# PIC, against configure's OWN output, for the reason at the flag above.
+if [ -f "$BUILD/ffbuild/config.mak" ]; then
+    grep -q '^CONFIG_PIC=yes' "$BUILD/ffbuild/config.mak" \
+        || { echo "FAIL: ffmpeg configure did not record CONFIG_PIC=yes. The static archives would" >&2
+             echo "      be non-PIC and the final link of libcw_runtime.so would fail on" >&2
+             echo "      relocations, twenty minutes from now, naming ffmpeg and not the flag." >&2
+             exit 1; }
+    echo "    CONFIG_PIC=yes (from ffbuild/config.mak)"
+fi
 
 # The licence check, against configure's OWN output rather than the flags we passed — passing
 # --disable-gpl and believing it is the same mistake as believing an arm engaged because its
@@ -137,7 +157,7 @@ done
 # variables. A configure that ignored --arch produces x86-64 objects on a build machine that has
 # them, and the failure would otherwise arrive at link time as "ignoring incompatible
 # libavcodec.a" — a message that names the file and not the reason.
-ELF_MACHINE=$(readelf -h "$AVC" 2>/dev/null | sed -n 's/.*Machine: *//p' | head -1 || true)
+ELF_MACHINE=$("$CW_READELF" -h "$AVC" 2>/dev/null | sed -n 's/.*Machine: *//p' | head -1 || true)
 if [ -n "$ELF_MACHINE" ]; then
     case "$ABI:$ELF_MACHINE" in
         arm64-v8a:*AArch64*) : ;;

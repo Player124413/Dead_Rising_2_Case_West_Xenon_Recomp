@@ -155,7 +155,7 @@ DXC=$PREFIX/jniLibs/libdxcompiler.so
 # Architecture, from the ELF header rather than from which directory the build ran in: a configure
 # that ignored the toolchain file produces host objects, and the failure would otherwise arrive on
 # a device as a dlopen error naming a file that is plainly there.
-MACHINE=$("$CW_NDK/toolchains/llvm/prebuilt/$CW_HOST_TAG/bin/llvm-readelf" -h "$DXC" 2>/dev/null \
+MACHINE=$("$CW_READELF" -h "$DXC" 2>/dev/null \
     | sed -n 's/.*Machine: *//p' | head -1 || true)
 if [ -n "$MACHINE" ]; then
     case "$ABI:$MACHINE" in

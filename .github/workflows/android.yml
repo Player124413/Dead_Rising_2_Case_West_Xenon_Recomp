@@ -75,6 +75,14 @@ env:
   # Pinned here rather than discovered, because "the newest Gradle" is a build variable nobody
   # decided on. Must match android/gradle/wrapper/gradle-wrapper.properties.
   GRADLE_VERSION: "8.11.1"
+  # Where the recompilers are, for tools/android/build_apk.sh and everything it calls. Its default
+  # is the developer convention ($HOME/GithubRepo/<name>, the same one runtime/CMakeLists.txt uses)
+  # and CI clones them beside the checkout instead, so without these the failure is "no XenonRecomp
+  # checkout at /home/runner/GithubRepo/XenonRecomp" for a checkout that exists and was patched two
+  # steps earlier. build_apk.sh also falls back to the sibling and says so; being explicit here is
+  # better than relying on a fallback, and the fallback is for a human in a CI-shaped checkout.
+  CW_XENON_ROOT: ${{ github.workspace }}/../XenonRecomp
+  CW_XENOS_ROOT: ${{ github.workspace }}/../XenosRecomp
 
 jobs:
   # -----------------------------------------------------------------------------------------
@@ -114,6 +122,13 @@ jobs:
             echo "installing ndk;$NDKV"
             yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDKV" >/dev/null
           fi
+          # The platform and build-tools the module compiles against, installed rather than
+          # assumed. A runner image carries whichever platforms were current when it was baked,
+          # and the failure when compileSdk is not one of them is "Failed to find target with hash
+          # string 'android-35'" — a message about a target, in a job that installed an NDK two
+          # steps earlier and looks like it did the Android part already.
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-35" "build-tools;35.0.0" >/dev/null
           echo "ANDROID_NDK_HOME=$SDK/ndk/$NDKV" >> "$GITHUB_ENV"
 
       - name: clone recompilers at pinned bases and apply local patches
@@ -225,6 +240,10 @@ jobs:
           NDKV=$(sed -n 's/^cw\.ndkVersion=\(.*\)$/\1/p' android/gradle.properties)
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
           [ -d "$SDK/ndk/$NDKV" ] || yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDKV" >/dev/null
+          # Same as the apk job: install the platform compileSdk names rather than trusting the
+          # runner image to have been baked with it.
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-35" "build-tools;35.0.0" >/dev/null
           echo "ANDROID_NDK_HOME=$SDK/ndk/$NDKV" >> "$GITHUB_ENV"
 
       - name: clone recompilers at pinned bases and apply local patches
@@ -474,6 +493,10 @@ jobs:
           NDKV=$(sed -n 's/^cw\.ndkVersion=\(.*\)$/\1/p' android/gradle.properties)
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
           [ -d "$SDK/ndk/$NDKV" ] || yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDKV" >/dev/null
+          # Same as the apk job: install the platform compileSdk names rather than trusting the
+          # runner image to have been baked with it.
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-35" "build-tools;35.0.0" >/dev/null
           echo "ANDROID_NDK_HOME=$SDK/ndk/$NDKV" >> "$GITHUB_ENV"
 
       - name: clone recompilers at pinned bases and apply local patches

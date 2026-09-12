@@ -72,11 +72,16 @@ BUILD=$WORK/build-$ABI
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 
 echo "==> configuring"
+# c++_shared and not c++_static, matching every other dependency here: this archive is linked into
+# libcw_runtime.so, which AGP builds against c++_shared and ships with one libc++_shared.so. For a
+# STATIC library the STL choice does not change which libc++ the objects end up using at final
+# link, so this is not a rescue — it is one answer instead of two, in a build where a reader who
+# sees c++_static in one script and c++_shared in four has to work out whether that is deliberate.
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$CW_TOOLCHAIN_FILE" \
     -DANDROID_ABI="$ABI" \
     -DANDROID_PLATFORM="android-$CW_API" \
-    -DANDROID_STL=c++_static \
+    -DANDROID_STL=c++_shared \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DBUILD_SHARED_LIBS=OFF \

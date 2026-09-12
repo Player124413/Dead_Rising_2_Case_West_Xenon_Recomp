@@ -47,9 +47,24 @@ private fun expand(value: String, seen: Set<String> = emptySet()): String =
 fun prop(key: String, default: String = ""): String =
     rawProp(key)?.let { expand(it) } ?: default
 
-val repoRoot = file(prop("cw.repoRoot", "..")).absoluteFile
+// Relative property paths resolve against the ROOT project directory (android/), not this
+// module's (android/app/), because that is what gradle.properties documents: cw.repoRoot=.. means
+// ".." from android/, and ../third_party/android means the repository's third_party. Project.file()
+// inside a module script resolves against the MODULE, so every one of those defaults would become
+// android/app/../third_party — a directory that does not exist — and it would do so silently,
+// because file() is perfectly willing to describe a path with nothing at it. CI passes absolute -P
+// values for most of these and never notices; a developer who follows android/README.md and runs
+// `gradle assembleDebug` inside android/ gets a configure failure naming a path that looks like a
+// typo of the one they can see in gradle.properties.
+fun propFile(key: String, default: String = ""): File {
+    val value = prop(key, default)
+    val f = File(value)
+    return (if (f.isAbsolute) f else File(rootProject.projectDir, value)).absoluteFile
+}
+
+val repoRoot = propFile("cw.repoRoot", "..")
 val abi = prop("cw.abi", "arm64-v8a")
-val prebuilt = file(prop("cw.prebuiltRoot", "../third_party/android/$abi")).absoluteFile
+val prebuilt = propFile("cw.prebuiltRoot", "../third_party/android/$abi")
 
 // An empty cw.xenonRoot means "the default runtime/CMakeLists.txt would have used" and is
 // expanded HERE, where the answer can be printed rather than guessed at from a configure log.
@@ -57,7 +72,7 @@ val prebuilt = file(prop("cw.prebuiltRoot", "../third_party/android/$abi")).abso
 // the XEX loader and the shader translator are compiled into the runtime.
 fun sibling(key: String, name: String): String {
     val given = prop(key)
-    if (given.isNotEmpty()) return file(given).absolutePath
+    if (given.isNotEmpty()) return propFile(key).absolutePath
     val home = System.getenv("HOME") ?: error("\$HOME is not set; pass -P$key=/path/to/$name")
     return file("$home/GithubRepo/$name").absolutePath
 }
@@ -75,7 +90,7 @@ val xenonBuild = prop("cw.xenonBuild").ifEmpty { "$xenonRoot/build-android-$abi"
 // configuration error rather than a build error 40 files deep: GameActivity extends
 // SDLActivity, and "unresolved reference: SDLActivity" says nothing about the script that
 // was supposed to copy it.
-val sdlJavaDir = file(prop("cw.sdlJavaDir", "../third_party/android/sdl-java")).absoluteFile
+val sdlJavaDir = propFile("cw.sdlJavaDir", "../third_party/android/sdl-java")
 if (!File(sdlJavaDir, "org/libsdl/app/SDLActivity.java").exists()) {
     throw GradleException(
         """
@@ -101,7 +116,7 @@ if (!File(sdlJavaDir, "org/libsdl/app/SDLActivity.java").exists()) {
 // which is a better message than a build failure for something that is not a build problem.
 // The shader cache is game-derived and is never staged by CI for the same reason the game
 // itself is not: no runner may hold it (release-plan E.1).
-val appAssetsDir = file(prop("cw.appAssets", "../third_party/android/app-assets")).absoluteFile
+val appAssetsDir = propFile("cw.appAssets", "../third_party/android/app-assets")
 if (!File(appAssetsDir, "cw").exists()) {
     logger.warn(
         "cw: no runtime assets staged at $appAssetsDir/cw — the APK will build, and the " +
@@ -117,9 +132,9 @@ if (!File(appAssetsDir, "cw").exists()) {
 // cannot be discovered at run time: adrenotools dlopens them BY NAME from the app's own
 // library directory, so an APK missing them fails at driver load with a message from inside
 // the driver loader rather than one from us.
-val adrenotoolsPrefix = file(prop("cw.adrenotoolsPrefix", "${prebuilt}/adrenotools")).absoluteFile
+val adrenotoolsPrefix = propFile("cw.adrenotoolsPrefix", "${prebuilt}/adrenotools")
 val adrenotoolsJniLibs =
-    file(prop("cw.adrenotoolsJniLibs", "${prebuilt}/adrenotools/jniLibs")).absoluteFile
+    propFile("cw.adrenotoolsJniLibs", "${prebuilt}/adrenotools/jniLibs")
 val haveAdrenotools = File(adrenotoolsPrefix, "include/adrenotools/driver.h").exists()
 
 // DXC, from tools/android/build_dxc.sh. Also OPTIONAL at build time and also written for its
@@ -128,14 +143,14 @@ val haveAdrenotools = File(adrenotoolsPrefix, "include/adrenotools/driver.h").ex
 // cannot draw at all. A warning rather than an error because the stub-image artifact CI builds on
 // every pull request has no shaders to translate either, and failing that build over a library only
 // a playable artifact needs would be the wrong trade.
-val dxcJniLibs = file(prop("cw.dxcJniLibs", "${prebuilt}/dxc/jniLibs")).absoluteFile
+val dxcJniLibs = propFile("cw.dxcJniLibs", "${prebuilt}/dxc/jniLibs")
 val haveDxc = File(dxcJniLibs, "libdxcompiler.so").exists()
 
 // Resolved here rather than inside nested string templates: `"${prop("a", "${b}/c")}"` is legal
 // Kotlin and is also the kind of line that gets edited wrong, and the two prefixes are used twice
 // each (once in the arguments, once in the configure-time summary below).
-val sdl2Prefix = file(prop("cw.sdl2Prefix", "${prebuilt}/sdl2")).absolutePath
-val ffmpegPrefix = file(prop("cw.ffmpegPrefix", "${prebuilt}/ffmpeg")).absolutePath
+val sdl2Prefix = propFile("cw.sdl2Prefix", "${prebuilt}/sdl2").absolutePath
+val ffmpegPrefix = propFile("cw.ffmpegPrefix", "${prebuilt}/ffmpeg").absolutePath
 val ppcDir = prop("cw.ppcDir")
 
 // The optional -D flags, as explicit typed lists. `listOf(...) + if (x) listOf(...) else
@@ -143,7 +158,10 @@ val ppcDir = prop("cw.ppcDir")
 // the failure it produces is a compile error in a build file, which is the least useful place in
 // this project to have to think about type inference.
 val optionalArgs: List<String> = buildList {
-    if (ppcDir.isNotEmpty()) add("-DCW_PPC_DIR=${file(ppcDir).absolutePath}")
+    if (ppcDir.isNotEmpty()) {
+        val f = File(ppcDir)
+        add("-DCW_PPC_DIR=${(if (f.isAbsolute) f else File(rootProject.projectDir, ppcDir)).absolutePath}")
+    }
     if (haveAdrenotools) add("-DCW_ADRENOTOOLS_PREFIX=$adrenotoolsPrefix")
 }
 // The one combination that produces an APK which boots to a black screen: a REAL guest image with

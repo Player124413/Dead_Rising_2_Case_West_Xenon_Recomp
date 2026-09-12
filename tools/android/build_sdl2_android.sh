@@ -127,9 +127,21 @@ done
 
 # Position independence, asserted rather than assumed: an -fPIC-less archive links fine into
 # an executable and fails into a shared library, and this one goes into a shared library.
-if "$CW_NM" "$LIB" 2>/dev/null | grep -q 'R_AARCH64_ADR_PREL_PG_HI21'; then
-    echo "FAIL: libSDL2.a has non-PIC relocations — SDL_STATIC_PIC did not take." >&2
-    exit 1
+#
+# Checked against SDL's own CMake cache, and NOT by grepping relocations out of the archive —
+# which is what this used to do, and which was wrong twice over. `nm` prints symbols and never
+# relocation types, so the pattern could not match anything and the check could not fail; and
+# R_AARCH64_ADR_PREL_PG_HI21 is a PC-relative page relocation that legitimate PIC code also
+# carries, so even with the right tool it was the wrong question. A check that cannot fail is
+# worse than no check, because it is also a claim somebody will believe.
+if [ -f "$BUILD/CMakeCache.txt" ]; then
+    grep -q '^SDL_STATIC_PIC:BOOL=ON' "$BUILD/CMakeCache.txt" \
+        || { echo "FAIL: SDL_STATIC_PIC is not ON in $BUILD/CMakeCache.txt, so libSDL2.a is" >&2
+             echo "      non-PIC and linking it into libcw_runtime.so will fail on relocations" >&2
+             echo "      that name SDL's objects. The flag is passed above; if the cache does" >&2
+             echo "      not record it, this SDL2 version renamed the option." >&2
+             exit 1; }
+    echo "    SDL_STATIC_PIC=ON (from CMakeCache.txt)"
 fi
 
 # The Java version constants must match the library this script just built. This is the check

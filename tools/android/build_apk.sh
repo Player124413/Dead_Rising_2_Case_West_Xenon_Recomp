@@ -61,8 +61,30 @@ DXC_PREFIX="$PREBUILT/dxc"
 SDL_JAVA="$ROOT/third_party/android/sdl-java"
 APP_ASSETS="$ROOT/third_party/android/app-assets"
 
-XENON_ROOT=${CW_XENON_ROOT:-$HOME/GithubRepo/XenonRecomp}
-XENOS_ROOT=${CW_XENOS_ROOT:-$HOME/GithubRepo/XenosRecomp}
+# The sibling checkouts. $HOME/GithubRepo/<name> is the convention runtime/CMakeLists.txt uses on
+# a developer's machine, and it is the default for the same reason the Gradle properties default to
+# it: one answer in one spelling everywhere. But CI clones them beside the checkout instead
+# (../XenonRecomp), and a default that only works on one of the two layouts is a default that fails
+# in the layout nobody is sitting at — with a message about a path that looks like a typo. So this
+# falls back and SAYS which it chose, and names the variable that overrides both.
+cw_sibling() {
+    local var=$1 name=$2 given
+    given=${!var:-}
+    if [ -n "$given" ]; then printf '%s' "$given"; return 0; fi
+    if [ -d "$HOME/GithubRepo/$name" ]; then
+        printf '%s' "$HOME/GithubRepo/$name"; return 0
+    fi
+    if [ -d "$ROOT/../$name" ]; then
+        # To stderr, because this function is called in a command substitution: a progress line on
+        # stdout here would be CAPTURED INTO THE VARIABLE it is describing, and the failure would
+        # arrive as a path that begins with four spaces and a sentence.
+        echo "    $var not set; using the checkout beside this repository: $ROOT/../$name" >&2
+        printf '%s' "$(cd "$ROOT/.." && pwd)/$name"; return 0
+    fi
+    printf '%s' "$HOME/GithubRepo/$name"   # the path the failure message will name
+}
+XENON_ROOT=$(cw_sibling CW_XENON_ROOT XenonRecomp)
+XENOS_ROOT=$(cw_sibling CW_XENOS_ROOT XenosRecomp)
 XENON_BUILD="$XENON_ROOT/build-android-$ABI"
 
 echo "======================================================================"
@@ -85,8 +107,10 @@ need python3 "tools/gen_stub_ppc.py and the two generated-stub gates"
 need git    "the sibling checkouts and libadrenotools are cloned"
 need curl   "SDL2 and ffmpeg are fetched as release tarballs"
 
-# Gradle: the wrapper if somebody generated it, else a gradle on PATH (which is what
-# gradle/actions/setup-gradle provides on CI). Neither is an error yet — but both missing is.
+# Gradle: the wrapper if somebody generated it, else a gradle on PATH. The repository ships
+# gradle-wrapper.properties and deliberately not the wrapper jar (a binary in a repo that keeps no
+# others, regenerable from that file), so on CI this takes the second branch: android.yml installs
+# the pinned distribution and puts it on PATH. Neither being present is the error, not either.
 GRADLE=""
 if [ -x "$ROOT/android/gradlew" ]; then
     GRADLE="$ROOT/android/gradlew"
@@ -288,6 +312,7 @@ cd "$ROOT/android"
     "-Pcw.ffmpegPrefix=$FFMPEG_PREFIX" \
     "-Pcw.adrenotoolsPrefix=$ADRENO_PREFIX" \
     "-Pcw.adrenotoolsJniLibs=$ADRENO_PREFIX/jniLibs" \
+    "-Pcw.dxcJniLibs=$DXC_PREFIX/jniLibs" \
     "-Pcw.appAssets=$APP_ASSETS" \
     "-Pcw.xenonRoot=$XENON_ROOT" \
     "-Pcw.xenosRoot=$XENOS_ROOT" \

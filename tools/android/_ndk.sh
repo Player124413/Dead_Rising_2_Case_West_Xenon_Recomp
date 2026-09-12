@@ -53,9 +53,10 @@ cw_find_ndk() {
 #   CW_NDK              the NDK root
 #   CW_TOOLCHAIN_FILE   build/cmake/android.toolchain.cmake
 #   CW_HOST_TAG         linux-x86_64 / darwin-x86_64
-#   CW_CLANG, CW_CLANGXX, CW_AR, CW_NM, CW_STRIP   the llvm tools for arm64
+#   CW_CLANG, CW_CLANGXX, CW_AR, CW_NM, CW_STRIP, CW_READELF   the llvm tools for this ABI
 #   CW_API              the platform level, matching android/app's minSdk
-#   CW_TRIPLE           aarch64-linux-android<API>, ffmpeg's --target-os spelling
+#   CW_TRIPLE           aarch64-linux-android<API> — the clang wrapper's spelling
+#   CW_TARGET           aarch64 / x86_64 — ffmpeg's --arch spelling
 cw_require_ndk() {
     local abi="${1:-arm64-v8a}"
     CW_API="${CW_API:-26}"
@@ -98,17 +99,37 @@ EOF
     esac
 
     CW_BIN="$bin"
-    CW_CLANG="$bin/${target}${CW_API}-clang"
-    CW_CLANGXX="$bin/${target}${CW_API}-clang++"
+    CW_TARGET="$target"
+    CW_TRIPLE="${target}-linux-android${CW_API}"
     CW_AR="$bin/llvm-ar"
     CW_NM="$bin/llvm-nm"
     CW_STRIP="$bin/llvm-strip"
     CW_RANLIB="$bin/llvm-ranlib"
-    CW_TRIPLE="${target}-linux-android${CW_API}"
+    CW_READELF="$bin/llvm-readelf"
 
-    for t in "$CW_CLANG" "$CW_AR" "$CW_NM"; do
-        [ -x "$t" ] || { echo "FAIL: $t is not executable — is the NDK complete?" >&2; return 1; }
+    # THE WRAPPER NAME IS THE FULL TRIPLE PLUS THE API LEVEL, not the short architecture name.
+    # `$bin/${target}${CW_API}-clang` spells `aarch6426-clang`, which is not a file in any NDK
+    # ever shipped, and the failure it produces is "[...] aarch6426-clang is not executable — is
+    # the NDK complete?" for an NDK that is perfectly complete. It cost a CI run to find out, and
+    # it is written down here because the wrong name LOOKS plausible: both spellings read as
+    # "architecture then API level", and only one of them is what the NDK's own bin/ contains
+    # (aarch64-linux-android21-clang ... aarch64-linux-android35-clang).
+    CW_CLANG="$bin/${target}-linux-android${CW_API}-clang"
+    CW_CLANGXX="$bin/${target}-linux-android${CW_API}-clang++"
+
+    local missing=()
+    for t in "$CW_CLANG" "$CW_CLANGXX" "$CW_AR" "$CW_NM" "$CW_READELF"; do
+        [ -x "$t" ] || missing+=("$t")
     done
+    if [ ${#missing[@]} -ne 0 ]; then
+        echo "FAIL: these NDK tools are missing or not executable:" >&2
+        printf '        %s\n' "${missing[@]}" >&2
+        echo "      in $bin, which holds:" >&2
+        ls "$bin" 2>/dev/null | grep -E "clang$|clang\+\+$|^llvm-" | head -20 >&2
+        echo "      If there is no ${target}-linux-android${CW_API}-clang but there are other API" >&2
+        echo "      levels, the NDK is older than the pinned one or CW_API is out of range." >&2
+        return 1
+    fi
 
     echo "    NDK           $CW_NDK"
     echo "    abi / api     $abi / android-$CW_API"

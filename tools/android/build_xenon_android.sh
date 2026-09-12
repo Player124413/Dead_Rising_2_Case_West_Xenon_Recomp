@@ -76,6 +76,16 @@ cmake -S "$XENON" -B "$BUILD" -G Ninja \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     >"$BUILD/configure.log" 2>&1 || { tail -40 "$BUILD/configure.log"; exit 1; }
 
+# PIC, verified against the cache this script's own configure wrote. These three archives are
+# linked into a SHARED library, and a non-PIC object in one of them is a relocation error at that
+# link — after all three have built, in a message that names XenonUtils and not a CMake variable.
+grep -q '^CMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON' "$BUILD/CMakeCache.txt" \
+    || { echo "FAIL: CMAKE_POSITION_INDEPENDENT_CODE is not ON in $BUILD/CMakeCache.txt." >&2
+         echo "      The flag is passed above; if the cache does not record it, XenonRecomp's" >&2
+         echo "      CMake overrode it, and the arm64 link of libcw_runtime.so will fail on" >&2
+         echo "      relocations naming these archives." >&2
+         exit 1; }
+
 echo "==> building XenonUtils, fmt, xxhash"
 # Named targets rather than the default all: `all` includes the recompiler executable and its
 # test data, none of which an arm64 build can use. If a target name has moved upstream, the
@@ -120,7 +130,7 @@ fi
 
 # Architecture, asserted: an x86-64 archive in this tree would link-fail with "ignoring
 # incompatible libXenonUtils.a", which names the file and not the reason.
-ARCH=$(readelf -h "$BUILD/XenonUtils/libXenonUtils.a" 2>/dev/null \
+ARCH=$("$CW_READELF" -h "$BUILD/XenonUtils/libXenonUtils.a" 2>/dev/null \
     | sed -n 's/.*Machine: *//p' | head -1 || true)
 case "$ABI:$ARCH" in
     arm64-v8a:*AArch64*) : ;;
