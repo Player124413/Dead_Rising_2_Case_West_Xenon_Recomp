@@ -67,7 +67,13 @@ if [ "$rc" -ne 0 ]; then
     # were never sent, so the annotation cost a run and said nothing. So — every line that looks
     # like a diagnostic, from anywhere in the log, then the tail; and every line CLIPPED, because
     # forty short lines carry more information than one long one.
-    diag=$(grep -n -E 'error:|Error [0-9]+|undefined reference|undefined symbol|FAILED:|cannot find|ld(\.lld)?:|fatal|No such file' \
+    # The pattern list has to cover the tools this pipeline actually runs, and it did not. A run that
+    # failed inside Gradle published an annotation whose diagnostic section was EMPTY and whose tail
+    # was twenty-five Java stack frames, because a Kotlin error is spelled
+    # `e: file:///...GameActivity.kt:244:22 Unresolved reference 'editMode'` and a CMake configure
+    # failure is spelled `CMake Error at CMakeLists.txt:341 (message):`, and neither contains
+    # `error:`. Both shapes are here now, with the three lines Gradle uses to introduce a failure.
+    diag=$(grep -n -E 'error:|Error [0-9]+|undefined reference|undefined symbol|FAILED:|cannot find|ld(\.lld)?:|fatal|No such file|^e: |Unresolved reference|CMake Error|FAILURE:|BUILD FAILED|What went wrong|Execution failed for task' \
         "$LOG" 2>/dev/null | tail -n 20 | cut -c1-300 || true)
     # The pipe is INSIDE the command substitution, which is not a stylistic detail. Written as
     # `msg=$( ... ) | awk ...`, the left side of a pipeline runs in a subshell, so msg is assigned
@@ -77,9 +83,16 @@ if [ "$rc" -ne 0 ]; then
     msg=$(
         {
             if [ -n "$diag" ]; then
-                printf 'lines matching a diagnostic pattern, from anywhere in the log:\n%s\n\nlast 25 lines:\n' "$diag"
+                printf 'lines matching a diagnostic pattern, from anywhere in the log:\n%s\n\nlast 25 lines, Java and Gradle stack frames removed:\n' "$diag"
             fi
-            tail -n 25 "$LOG" | cut -c1-300
+            # Java and Gradle stack frames are the one kind of noise that reliably fills a tail whole:
+            # `at org.gradle.internal.operations...` twenty-five times over is a tail carrying no
+            # information, and it is what the last run published. Filtered from a longer window so
+            # that removing the frames still leaves twenty-five real lines. The `|| true` is not
+            # decoration: grep -v exits 1 when it filters everything away, and under pipefail that
+            # would fail the substitution and cost the annotation this script exists to publish.
+            { tail -n 250 "$LOG" | grep -v -E '^[[:space:]]*(at |\.\.\. [0-9]+ more$)' || true; } |
+                tail -n 25 | cut -c1-300
         } | awk '{gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%s", (NR > 1 ? "%0A" : ""), $0}'
     )
     echo "::error::$* exited $rc. Diagnostics and tail of $LOG follow.%0A%0A$msg"
