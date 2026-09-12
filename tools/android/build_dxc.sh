@@ -123,9 +123,29 @@ git -C "$SRC" log -1 --format='    commit %h  %ad  %s' --date=short
 # configure error naming a header rather than a submodule.
 echo "==> submodules (all of them)"
 git -C "$SRC" submodule update --init --recursive
-for d in external/SPIRV-Tools external/SPIRV-Headers external/DirectX-Headers external/googletest; do
+# What is required is what the TAG has, and that is a question for the index rather than for
+# .gitmodules. At v1.9.2607 .gitmodules names four submodules and external/ holds three gitlinks —
+# DirectX-Headers, SPIRV-Headers and SPIRV-Tools — with no googletest behind its entry, so submodule
+# update has nothing to populate and external/googletest stays empty. This script listed it as
+# required anyway and spent a run finding out; the tests that would have used it are off
+# (HLSL_INCLUDE_TESTS, LLVM_INCLUDE_TESTS, CLANG_INCLUDE_TESTS) and DXC locates gtest through
+# external/GTestConfig.cmake only when they are on. `git submodule status` prints one line per
+# gitlink and prefixes an unpopulated one with '-', so the set is read from the repository instead of
+# being written down here, and a tag that adds a fifth submodule is caught without editing this file.
+SUBMISSING=$(git -C "$SRC" submodule status | sed -n 's/^-\([0-9a-f]*\) \([^ ]*\).*/\2/p')
+if [ -n "$SUBMISSING" ]; then
+    echo "FAIL: still unpopulated after submodule update --init --recursive:" >&2
+    while read -r m; do echo "      $m" >&2; done <<<"$SUBMISSING"
+    git -C "$SRC" submodule status | sed 's/^/      status: /' >&2
+    exit 1
+fi
+git -C "$SRC" submodule status | sed 's/^/    /'
+for d in external/SPIRV-Tools external/SPIRV-Headers external/DirectX-Headers; do
     [ -n "$(ls -A "$SRC/$d" 2>/dev/null)" ] \
-        || { echo "FAIL: $d is empty — git -C $SRC submodule update --init --recursive $d" >&2; exit 1; }
+        || { echo "FAIL: $d is empty though git reports it populated." >&2
+             echo "      DXC's external/CMakeLists.txt needs SPIRV-Tools and SPIRV-Headers for" >&2
+             echo "      SPIR-V codegen, and root CMakeLists.txt:685 needs DirectX-Headers on *nix." >&2
+             exit 1; }
 done
 
 # Check the FILE, not the directory. A directory is what DXC's own configure tests and what an empty
@@ -409,8 +429,12 @@ cmake --build "$BUILD" --target dxcompiler -j"$JOBS" -- -k 20 >"$BUILD/make.log"
          tail -60 "$BUILD/make.log" >&2; exit 1; }
 
 # LLVM puts shared libraries in lib/ but the exact path has moved between DXC revisions, so this
-# takes the first real file rather than a hardcoded one — and says which it found.
-SO=$(find "$BUILD" -name 'libdxcompiler.so*' -type f | head -1)
+# takes the first real file rather than a hardcoded one — and says which it found. -print -quit rather
+# than `find | head -1`: head exits after the first line and find then dies on a closed pipe, which
+# under this script's pipefail makes the pipeline's status 141 and set -e aborts the assignment with
+# no message at all, after an hour of building. The matches here are few enough that it would
+# probably never bite, and a capture that is correct only for small inputs is not a capture.
+SO=$(find "$BUILD" -name 'libdxcompiler.so*' -type f -print -quit)
 [ -n "$SO" ] || { echo "FAIL: the build produced no libdxcompiler.so. See $BUILD/make.log" >&2; exit 1; }
 echo "    built $SO"
 
