@@ -150,6 +150,28 @@ before the load (several variables are read once behind a `once_flag`).
 `window.cpp` spells with the platform's prefix and suffix, and the same name CMake gives the
 target. Three places that must agree, so the name is the target's own and not a fourth literal.
 
+**The hand-off is `dlopen` + `dlsym`, not a call**, and three separate requirements fall out of it.
+`SDL_android.c`'s `nativeRunMain` dlopens whatever `getMainSharedObject()` names and dlsyms whatever
+`getMainFunction()` returns, then puts `"app_process"` in `argv[0]` ahead of the arguments. So:
+
+* `SDL_main` must be an **exported dynamic symbol** of `libcw_runtime.so`. A symbol that is present
+  but hidden produces one logcat line — `Couldn't find function SDL_main in library
+  libcw_runtime.so` — and no other symptom whatsoever. `runtime/CMakeLists.txt` passes no
+  `-fvisibility=hidden` to this target, and that absence is a requirement rather than a default
+  nobody disturbed.
+* `argv[1]` is the first argument *we* chose, which is why `--smoke` reaches `main.cpp`'s
+  `strcmp(argv[1], "--smoke")` from `getArguments()` unchanged.
+* `SDL2main` must not be linked, and on Android that is not a judgement call: the only file SDL's
+  CMake gives `SDLMAIN_SOURCES` there is `src/main/android/SDL_android_main.c`, which in 2.32.10 is
+  seven lines of comment — *"As of SDL 2.0.6 this file is no longer necessary."* The JNI half lives
+  in `libSDL2.a` itself. This is why `tools/android/build_sdl2_android.sh` requires
+  `Java_org_libsdl_app_SDLActivity_nativeRunMain` in the archive and **forbids** `SDL_main` in it:
+  ours is the only definition allowed, or the final link has two.
+
+The same reading of SDL's source settles which system libraries a static SDL2 needs — its CMake
+declares them `PRIVATE`, so `runtime/CMakeLists.txt` lists `log android dl OpenSLES GLESv1_CM
+GLESv2` itself rather than betting on what the installed package re-exports.
+
 ## 5. The GPU: the driver is not the system one
 
 This is the section that decides whether the port is playable, and it has three parts.

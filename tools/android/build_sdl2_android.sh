@@ -113,17 +113,45 @@ if [ ! -f "$PREFIX/lib/cmake/SDL2/sdl2-config.cmake" ] \
     exit 1
 fi
 
-# SDL_main must be in there, and so must the JNI half that SDLActivity calls. Checking the
-# symbols rather than trusting the flags: SDL's Android support is conditional on the video
-# driver being built, and a build that quietly lost it produces a library that links and an app
-# that dies in nativeSetupJNI.
-for sym in SDL_main Java_org_libsdl_app_SDLActivity_nativeRunMain; do
-    if ! "$CW_NM" --defined-only "$LIB" 2>/dev/null | grep -q " $sym\$"; then
-        echo "FAIL: libSDL2.a does not define $sym." >&2
-        echo "      The Android backend is not in this build." >&2
-        exit 1
-    fi
-done
+# WHAT MUST BE IN libSDL2.a, AND WHAT MUST NOT — read off SDL 2.32.10's own source rather than off
+# an assumption that its desktop layout carries over. It does not, in either direction:
+#
+#   * The desktop intuition is that SDL_main lives in SDL2main and the app links it. On Android the
+#     only file SDLMAIN_SOURCES receives is src/main/android/SDL_android_main.c (CMakeLists.txt
+#     line 1291), and in 2.32.10 that file is SEVEN LINES OF COMMENT: "As of SDL 2.0.6 this file is
+#     no longer necessary." So libSDL2main.a is one empty object, and not linking it — which this
+#     port deliberately does not — costs nothing.
+#   * The JNI half lives in libSDL2.a itself, from src/core/android/SDL_android.c, which defines
+#     Java_org_libsdl_app_SDLActivity_nativeRunMain. THAT is the symbol to require, and requiring
+#     it is not pedantry: without it SDLActivity.nativeRunMain is an unsatisfied native method and
+#     the app dies with UnsatisfiedLinkError before one line of ours runs.
+#   * SDL_main is defined by SDL nowhere. nativeRunMain dlopens getMainSharedObject() and dlsyms
+#     getMainFunction() out of the handle, so SDL_main is OURS — host/android_bridge.cpp defines it
+#     extern "C". A libSDL2.a that DID define it would be a duplicate symbol at the final link, so
+#     its absence is asserted rather than merely tolerated. This is the check that fired when it
+#     was written the other way round, demanding a symbol SDL correctly does not provide.
+#
+# The dlopen-and-dlsym shape is load-bearing in three places that look unrelated, and all three are
+# recorded here because this is the file a reader reaches for when the app dies before main:
+# SDL_main must be exported with DEFAULT VISIBILITY in libcw_runtime.so (nothing in
+# runtime/CMakeLists.txt passes -fvisibility=hidden, and that is a fact worth re-checking if this
+# ever stops working); getLibraries() must name "cw_runtime" so that getMainSharedObject() derives
+# libcw_runtime.so; and nativeRunMain puts "app_process" in argv[0] before the arguments it was
+# given, so `--smoke` arrives as argv[1] — which is the slot main.cpp tests.
+NMOUT=$("$CW_NM" --defined-only "$LIB" 2>/dev/null)
+if ! printf '%s\n' "$NMOUT" | grep -q ' Java_org_libsdl_app_SDLActivity_nativeRunMain$'; then
+    echo "FAIL: libSDL2.a does not define Java_org_libsdl_app_SDLActivity_nativeRunMain." >&2
+    echo "      That symbol comes from src/core/android/SDL_android.c, so SDL's Android core" >&2
+    echo "      did not make it into this build." >&2
+    exit 1
+fi
+if printf '%s\n' "$NMOUT" | grep -q ' SDL_main$'; then
+    echo "FAIL: libSDL2.a DEFINES SDL_main, and host/android_bridge.cpp defines it too — a" >&2
+    echo "      duplicate symbol at the link of libcw_runtime.so. This SDL2 version put the" >&2
+    echo "      Android main back into the library; either drop ours or stop linking this one." >&2
+    exit 1
+fi
+echo "    nativeRunMain present; SDL_main correctly absent (ours to define and export)"
 
 # Position independence, asserted rather than assumed: an -fPIC-less archive links fine into
 # an executable and fails into a shared library, and this one goes into a shared library.

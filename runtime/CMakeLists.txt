@@ -563,12 +563,21 @@ if(CW_WINDOW)
     # two copies of SDL in one APK means two ideas about which surface exists. Everywhere
     # else the developer's system copy is shared and stays shared.
     #
-    # SDL2main is deliberately NOT linked, on ANY platform, and on Android the reason is
-    # structural: SDLActivity's nativeRunMain dlopens our library and calls SDL_main in it
-    # directly, and host/android_bridge.cpp defines exactly that symbol. On the desktops the
-    # reason is simpler — SDL2main exists to provide a `main` that forwards to SDL_main, and
-    # main.cpp already IS that `main`. Linking it would put two definitions of `main` on one
-    # link line. It has never been linked here and this is the note that keeps it that way.
+    # SDL2main is deliberately NOT linked, on ANY platform. On Android the reason is that there is
+    # nothing in it: the only file SDL's CMake puts in SDLMAIN_SOURCES for Android is
+    # src/main/android/SDL_android_main.c, and in 2.32.10 that file is seven lines of comment —
+    # "As of SDL 2.0.6 this file is no longer necessary." The JNI half is in libSDL2.a itself, from
+    # src/core/android/SDL_android.c, which is why tools/android/build_sdl2_android.sh requires
+    # Java_org_libsdl_app_SDLActivity_nativeRunMain THERE and forbids SDL_main there.
+    #
+    # And the mechanism is dlopen-plus-dlsym, not a call: nativeRunMain dlopens whatever
+    # getMainSharedObject() names and dlsyms whatever getMainFunction() returns. That is what makes
+    # SDL_main's VISIBILITY load-bearing — it has to be an exported dynamic symbol of
+    # libcw_runtime.so, so no -fvisibility=hidden may reach this target, and a symbol that is
+    # present but hidden produces "Couldn't find function SDL_main in library libcw_runtime.so" in
+    # logcat and no other symptom at all. On the desktops the reason not to link SDL2main is
+    # simpler: it exists to provide a `main` that forwards to SDL_main, and main.cpp already IS that
+    # `main`, so linking it would put two definitions of `main` on one link line.
     if(TARGET SDL2::SDL2-static)
         target_link_libraries(cw_runtime PRIVATE SDL2::SDL2-static)
         message(STATUS "SDL2 target: SDL2::SDL2-static")
@@ -761,7 +770,16 @@ endif()
 #   vulkan   — NOT linked, and see the Vulkan block above: linking it would put a second,
 #              hookless loader in the process beside the one the shadow table chose.
 if(ANDROID)
-    target_link_libraries(cw_runtime PRIVATE log)
+    # The Android system libraries SDL2 needs, listed explicitly rather than left for the imported
+    # SDL2::SDL2-static target to carry. SDL's own CMake declares them PRIVATE on that target
+    # (target_link_libraries(SDL2-static PRIVATE ${EXTRA_LIBS} ...)), and CMake does record a static
+    # library's PRIVATE link dependencies for its consumers — but whether the INSTALLED package
+    # re-exports them is a property of SDL's packaging that this build neither controls nor can
+    # check from here. What a missing one produces is a wall of undefined symbols at the final link
+    # (ANativeWindow_*, AAssetManager_*, SL_*, gl*), naming SDL's internals and no variable of ours;
+    # and linking a system library that is also linked transitively is not an error, so being
+    # explicit costs nothing. The set is 2.32.10's own EXTRA_LIBS for Android.
+    target_link_libraries(cw_runtime PRIVATE log android dl OpenSLES GLESv1_CM GLESv2)
 
     # libadrenotools (bylaws, BSD-2-Clause) — the custom GPU driver loader, i.e. the thing
     # that makes "Turnip" a row in the launcher instead of a rumour. OPTIONAL at build time
