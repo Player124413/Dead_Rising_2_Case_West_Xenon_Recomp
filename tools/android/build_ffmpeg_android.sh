@@ -130,7 +130,14 @@ fi
 echo "==> building"
 make -j"$(nproc)" >"$BUILD/make.log" 2>&1 || { tail -40 "$BUILD/make.log"; exit 1; }
 rm -rf "$PREFIX"
-make install >>"$BUILD/make.log" 2>&1
+# Guarded like the `make` above it: under `set -euo pipefail` an unguarded failure ends the script
+# silently, and the only record of it is in $BUILD/make.log, which the calling CI step never reads.
+# The line above has just deleted $PREFIX, so the silent version leaves no prefix and no reason.
+make install >>"$BUILD/make.log" 2>&1 \
+    || { echo "FAIL: make install did not populate $PREFIX." >&2
+         echo "      $PREFIX was deleted immediately before this. Last 40 lines of" >&2
+         echo "      $BUILD/make.log:" >&2
+         tail -40 "$BUILD/make.log"; exit 1; }
 
 echo "==> verifying"
 AVC="$PREFIX/lib/libavcodec.a"

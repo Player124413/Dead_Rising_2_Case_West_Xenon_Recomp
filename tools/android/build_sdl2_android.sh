@@ -86,7 +86,16 @@ echo "==> building"
 cmake --build "$BUILD" -j"$(nproc)" >"$BUILD/make.log" 2>&1 \
     || { tail -40 "$BUILD/make.log"; exit 1; }
 rm -rf "$PREFIX"
-cmake --install "$BUILD" >>"$BUILD/make.log" 2>&1
+# Guarded like the build above it, and for the same reason: this script runs under `set -euo
+# pipefail`, so an unguarded failure here ends it without printing a word, and the only copy of
+# what went wrong is in $BUILD/make.log — a file the CI step that called us never reads. The line
+# above has just deleted $PREFIX, which makes the silent version of this failure worse than a
+# failed build: the caller is left with no prefix at all and no reason.
+cmake --install "$BUILD" >>"$BUILD/make.log" 2>&1 \
+    || { echo "FAIL: cmake --install did not populate $PREFIX." >&2
+         echo "      $PREFIX was deleted immediately before this, so nothing is left of the" >&2
+         echo "      previous install either. Last 40 lines of $BUILD/make.log:" >&2
+         tail -40 "$BUILD/make.log"; exit 1; }
 
 echo "==> copying the Java half from the SAME tree"
 rm -rf "$JAVADIR"
