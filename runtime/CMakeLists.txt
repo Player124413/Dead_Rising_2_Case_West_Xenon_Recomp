@@ -13,7 +13,18 @@ cmake_minimum_required(VERSION 3.20)
 #
 # Override deliberately if you ever want to try otherwise:
 #   cmake -DCMAKE_CXX_COMPILER=g++ ...
-if(NOT DEFINED CMAKE_CXX_COMPILER)
+# ...AND NOT when a toolchain file was supplied. A toolchain file OWNS the compiler choice — that
+# is the whole contract of the file — and this block runs BEFORE project(), which is where CMake
+# reads it. So on Android the order is: this block, then project(), then the NDK's
+# android.toolchain.cmake. With only `NOT DEFINED CMAKE_CXX_COMPILER` guarding it, an Android build
+# on a machine that has a host clang++ (every CI runner does) sets CMAKE_CXX_COMPILER to
+# /usr/bin/clang++ and hands that to the toolchain file to accept or override. Whether it overrides
+# is a question about the NDK's internals that this build should not depend on, and getting it wrong
+# is quiet in the worst way: the host compiler would be invoked with the NDK's --target and
+# --sysroot flags, so it might even produce arm64 objects, and the first honest symptom would be a
+# link failure about a standard library nobody chose. Checked again after project() below, because
+# prevention here and detection there is how a wrong compiler gets named rather than inferred.
+if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT CMAKE_TOOLCHAIN_FILE)
     find_program(CW_CLANGXX clang++)
     if(NOT CW_CLANGXX)
         message(FATAL_ERROR
@@ -28,6 +39,37 @@ endif()
 # link time as three undefined o1heap* references, which reads like a missing
 # library rather than a disabled language.
 project(CaseWestRuntime C CXX)
+
+# Two assertions about the compiler this build is actually going to use, made after project()
+# because that is the first point at which CMake knows the answer. Both exist to replace a wall of
+# errors with one sentence:
+#
+#   * NOT Clang: 57,822 generated function bodies each fail on __builtin_assume, one error per
+#     function, in a build that takes minutes to reach its first failure. clang-cl on Windows
+#     reports Clang and passes, as it must — build.yml uses exactly that.
+#   * On ANDROID, a compiler that is not inside the NDK: the pre-project() block above no longer
+#     overrides a toolchain file's choice, but this is the check that says so out loud if some
+#     other path put a host compiler here. "prebuilt" is in every NDK's clang path
+#     (<ndk>/toolchains/llvm/prebuilt/<host>/bin/clang++) on every host OS, and in no host
+#     compiler's, so the test is a substring rather than a path comparison that would have to
+#     know about separators.
+if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR
+        "This runtime needs Clang (CMAKE_CXX_COMPILER_ID is \"${CMAKE_CXX_COMPILER_ID}\"). "
+        "XenonRecomp's ppc_context.h uses __builtin_assume, which GCC has no spelling of before "
+        "C++23's [[assume]]. Pass -DCMAKE_CXX_COMPILER=clang++ (or clang-cl on Windows).")
+endif()
+if(ANDROID)
+    string(FIND "${CMAKE_CXX_COMPILER}" "prebuilt" CW_COMPILER_IN_NDK)
+    if(CW_COMPILER_IN_NDK EQUAL -1)
+        message(FATAL_ERROR
+            "ANDROID build, but CMAKE_CXX_COMPILER is ${CMAKE_CXX_COMPILER}, which is not inside "
+            "the NDK (no \"prebuilt\" in the path). Something chose a HOST compiler for a "
+            "cross-build. AGP passes -DCMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake; "
+            "if you are configuring by hand, pass it too.")
+    endif()
+    message(STATUS "compiler: ${CMAKE_CXX_COMPILER} (${CMAKE_CXX_COMPILER_ID})")
+endif()
 
 # Windows: the CRT deprecates getenv, strerror, fopen and friends in favour of its own
 # _s variants. This runtime uses the standard ones throughout and deliberately keeps
