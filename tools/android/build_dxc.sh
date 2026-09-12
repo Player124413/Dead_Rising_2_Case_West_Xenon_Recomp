@@ -94,16 +94,53 @@ else
 fi
 git -C "$SRC" log -1 --format='    commit %h  %ad  %s' --date=short
 
-# Only the two submodules a SPIR-V-only build reads. googletest is for tests (off below) and
-# DirectX-Headers is for the DXIL/Windows half, which does not exist on Android. SPIRV-Tools is
-# pulled recursively because it has submodules of its own (its own SPIRV-Headers among them), and
-# a half-populated SPIRV-Tools is a configure error naming a header rather than a submodule.
-echo "==> submodules (SPIRV-Tools, SPIRV-Headers)"
-git -C "$SRC" submodule update --init --recursive external/SPIRV-Tools external/SPIRV-Headers
-for d in external/SPIRV-Tools external/SPIRV-Headers; do
+# ALL submodules, not a chosen subset. This named two, SPIRV-Tools and SPIRV-Headers, on the theory
+# that googletest is for tests (true, they are off below) and that DirectX-Headers serves the
+# DXIL/Windows half, "which does not exist on Android". The theory was wrong, and wrong quietly:
+#
+#   * include/dxc/Support/D3DReflection.h has an #ifndef _WIN32 branch whose entire purpose is to
+#     supply the Windows reflection interfaces to a *nix compile. It includes "d3d12shader.h", which
+#     lives in external/DirectX-Headers/include/directx/, and root CMakeLists.txt:685 puts that
+#     directory on the include path:
+#
+#         include_directories(AFTER ${DIRECTX_HEADER_INCLUDE_DIR}/directx
+#                                   ${DIRECTX_HEADER_INCLUDE_DIR}/wsl/stubs)
+#
+#     So the header is a *nix requirement, not a Windows one.
+#   * lib/HLSL, which compiles that header into LLVMHLSL, is in the dependency graph of the
+#     `dxcompiler` target this script asks for, even though nothing in it is DXIL.
+#   * external/CMakeLists.txt guards the requirement with `if(IS_DIRECTORY .../DirectX-Headers)` and
+#     an else() FATAL_ERROR — but git leaves an unpopulated submodule as an EMPTY DIRECTORY, so the
+#     test passed, DIRECTX_HEADER_INCLUDE_DIR was set to a directory with nothing in it, and the
+#     configure that should have refused produced a build that fails at [574/1327] of a step that had
+#     by then run forty minutes:
+#
+#         D3DReflection.h:21:10: fatal error: 'd3d12shader.h' file not found
+#
+# googletest is dead weight here and costs a few megabytes. The next wrong guess costs an hour.
+# SPIRV-Tools needs --recursive for submodules of its own, and a half-populated SPIRV-Tools is a
+# configure error naming a header rather than a submodule.
+echo "==> submodules (all of them)"
+git -C "$SRC" submodule update --init --recursive
+for d in external/SPIRV-Tools external/SPIRV-Headers external/DirectX-Headers external/googletest; do
     [ -n "$(ls -A "$SRC/$d" 2>/dev/null)" ] \
         || { echo "FAIL: $d is empty — git -C $SRC submodule update --init --recursive $d" >&2; exit 1; }
 done
+
+# Check the FILE, not the directory. A directory is what DXC's own configure tests and what an empty
+# submodule provides, which is exactly why that test passed on a tree that could not compile. It is
+# checked here rather than after the configure because it is a property of the source tree, and here
+# is seconds instead of the forty minutes the build needed to reach the same conclusion.
+DXH=$SRC/external/DirectX-Headers/include
+if [ ! -f "$DXH/directx/d3d12shader.h" ]; then
+    echo "FAIL: $DXH/directx/d3d12shader.h is missing." >&2
+    echo "      Every *nix build of DXC includes it through D3DReflection.h, and root" >&2
+    echo "      CMakeLists.txt:685 adds $DXH/directx to the include path for it." >&2
+    echo "      external/DirectX-Headers contains:" >&2
+    { ls -A "$SRC/external/DirectX-Headers" 2>/dev/null | head -5 >&2 || true; }
+    exit 1
+fi
+echo "    d3d12shader.h       $DXH/directx/d3d12shader.h"
 
 BUILD=$WORK/build-$ABI
 rm -rf "$BUILD" && mkdir -p "$BUILD"
@@ -352,8 +389,20 @@ grep -q 'ANDROID_STL:.*c++_shared' "$BUILD/CMakeCache.txt" \
     || echo "    WARNING: CMakeCache does not record c++_shared — check the STL before shipping."
 
 echo "==> building dxcompiler (this is the long step)"
-cmake --build "$BUILD" --target dxcompiler -j"$JOBS" >"$BUILD/make.log" 2>&1 \
-    || { tail -60 "$BUILD/make.log"; exit 1; }
+# -k 20 instead of ninja's default, which stops at the first failing edge. This step is forty-odd
+# minutes of a six-hour budget and re-dispatching it is a human action, so the question it has to
+# answer is not "does it build" but "how many things are wrong with it": a build that stops at the
+# first missing header costs one run per error, and the run that found D3DReflection.h had compiled
+# 573 translation units to say one thing. Twenty is enough to tell one cause from several and bounds
+# the waste when the cause is catastrophic. On failure every FAILED edge is listed, not just the last
+# screenful — grep -m rather than `grep | head`, because head exits on its twentieth line and grep
+# dies on the closed pipe, which under the pipefail this script declares reports fewer errors than
+# there were.
+cmake --build "$BUILD" --target dxcompiler -j"$JOBS" -- -k 20 >"$BUILD/make.log" 2>&1 \
+    || { echo "FAIL: the dxcompiler build stopped; $(grep -c '^FAILED:' "$BUILD/make.log" || true) edge(s) failed:" >&2
+         grep -m 20 '^FAILED:' "$BUILD/make.log" >&2 || true
+         echo "      tail of $BUILD/make.log:" >&2
+         tail -60 "$BUILD/make.log" >&2; exit 1; }
 
 # LLVM puts shared libraries in lib/ but the exact path has moved between DXC revisions, so this
 # takes the first real file rather than a hardcoded one — and says which it found.
