@@ -71,6 +71,33 @@ if(ANDROID)
     message(STATUS "compiler: ${CMAKE_CXX_COMPILER} (${CMAKE_CXX_COMPILER_ID})")
 endif()
 
+# The NDK's build/cmake/android.toolchain.cmake sets, at its lines 101-104,
+#
+#     set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+#     set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+#     set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+#     set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+#
+# ONLY re-roots every path a find_* command searches under CMAKE_FIND_ROOT_PATH, which the same file
+# points at the NDK sysroot. Every dependency this runtime links on Android lives in an absolute
+# prefix inside the checkout — third_party/android/<abi>/{sdl2,ffmpeg,adrenotools} — so each is
+# searched as <sysroot>/<prefix> and none is found. Two runs established that one dependency at a
+# time: first SDL2, then ffmpeg's find_path failing on the SAME prefix whose
+# include/libavcodec/avcodec.h the EXISTS test thirty lines above had just accepted. A plain EXISTS
+# is not re-rooted and a find_path is, which is the whole failure, and the reason it reads as "the
+# dependency is missing" rather than "the search is somewhere else".
+#
+# BOTH searches the re-rooted path and the real one. What keeps the host's own x86-64 copies out of
+# the answer is not the mode but NO_DEFAULT_PATH, which every prefixed find_* in this file passes:
+# with it the candidates are the prefix and nothing else, so BOTH adds exactly one — the path as it
+# was written. PROGRAM is left at NEVER, which is what the two find_program calls here want, since
+# clang++ and llvm-objcopy run on the host and must not be looked for inside the sysroot.
+if(ANDROID)
+    set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+    set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
+    set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
+endif()
+
 # Windows: the CRT deprecates getenv, strerror, fopen and friends in favour of its own
 # _s variants. This runtime uses the standard ones throughout and deliberately keeps
 # doing so — they are what the POSIX build uses and a divergence here would be a
@@ -337,23 +364,12 @@ endif()
 
 if(CW_WINDOW)
     if(ANDROID)
-        # The NDK's build/cmake/android.toolchain.cmake sets, at its line 102,
-        #
-        #     set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-        #
-        # and ONLY re-roots every path find_package searches under CMAKE_FIND_ROOT_PATH, which the
-        # same file points at the NDK sysroot. The CW_SDL2_PREFIX prepended to CMAKE_PREFIX_PATH
-        # above is an absolute path inside this checkout, so it is searched as <sysroot>/<prefix>,
-        # which does not exist, and the result is a failure indistinguishable from "SDL2 was never
-        # built" — which is what it reads as from the message alone, and is what it read as in the
-        # run that first hit this, on a prefix that had just been built and cached. BOTH searches
-        # the re-rooted path and the real one; PATHS names the prefix outright and NO_DEFAULT_PATH
-        # keeps the host's own SDL2 out of the answer, which is what the comment above this block
-        # has always wanted and what an unprefixed find_package cannot promise.
-        set(_cw_sdl2_find_mode "${CMAKE_FIND_ROOT_PATH_MODE_PACKAGE}")
-        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+        # The re-rooting this survives is handled once, in the CMAKE_FIND_ROOT_PATH_MODE_* block
+        # after project(). What is left to get right here is the search itself: PATHS names the
+        # prefix outright, and NO_DEFAULT_PATH keeps the host's own x86-64 SDL2 out of the answer —
+        # which is what the comment above this block has always wanted and what an unprefixed
+        # find_package cannot promise.
         find_package(SDL2 QUIET CONFIG PATHS "${CW_SDL2_PREFIX}" NO_DEFAULT_PATH)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE "${_cw_sdl2_find_mode}")
     else()
         find_package(SDL2 QUIET)
     endif()
@@ -741,6 +757,9 @@ endif()
 # .pc-file path-translation problem entirely: an MSYS2-built .pc names
 # `/c/cz/...`, which a Windows CMake cannot open.
 if(CW_FFMPEG_PREFIX)
+    # These three lookups are why the CMAKE_FIND_ROOT_PATH_MODE_* block after project() exists: each
+    # names an absolute prefix, and ONLY re-rooted every one of them into the NDK sysroot. An EXISTS
+    # test passing on a prefix whose find_path then failed is what that looked like from in here.
     find_path(CW_AVCODEC_INC libavcodec/avcodec.h
               PATHS "${CW_FFMPEG_PREFIX}/include" NO_DEFAULT_PATH REQUIRED)
     # Both spellings, because the two toolchains name the import library
