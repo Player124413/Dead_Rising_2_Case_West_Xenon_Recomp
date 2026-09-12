@@ -148,8 +148,20 @@ AVU="$PREFIX/lib/libavutil.a"
 # The decoder has to be IN the archive. --enable-decoder=xma2 is a request, and a request that
 # was not honoured produces a library that links and a game with no music — which is the exact
 # shape of defect this project refuses at build time rather than discovers at play time.
+# nm's output goes to a file and grep reads the file; it is NOT piped into grep -q. Under the
+# `set -o pipefail` this script declares, a pipe into grep -q reports a symbol missing when it is
+# present: grep -q exits the moment it matches, nm is still writing a 20 MB archive's symbol table
+# into a 64 KiB pipe buffer, the write fails with EPIPE, and the pipeline's status becomes the
+# producer's, which `if !` reads as "not found". It cost a CI run on exactly this check in
+# build_sdl2_android.sh, where the full account is. Hoisting nm out of the loop also means running
+# it once on libavcodec.a instead of three times.
+NMTXT=$(mktemp)
+trap 'rm -f "$NMTXT"' EXIT
+"$CW_NM" --defined-only "$AVC" >"$NMTXT" 2>/dev/null \
+    || { echo "FAIL: llvm-nm could not read $AVC, so the decoder check cannot run at all." >&2
+         exit 1; }
 for sym in xma2_decoder xma1_decoder avcodec_find_decoder; do
-    if ! "$CW_NM" --defined-only "$AVC" 2>/dev/null | grep -q " $sym\$"; then
+    if ! grep -q " $sym\$" "$NMTXT"; then
         echo "FAIL: libavcodec.a does not define $sym." >&2
         echo "      Check $BUILD/configure.log for what --disable-everything turned off." >&2
         exit 1

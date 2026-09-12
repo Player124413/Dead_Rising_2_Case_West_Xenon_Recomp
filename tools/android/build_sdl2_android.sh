@@ -147,14 +147,36 @@ fi
 # ever stops working); getLibraries() must name "cw_runtime" so that getMainSharedObject() derives
 # libcw_runtime.so; and nativeRunMain puts "app_process" in argv[0] before the arguments it was
 # given, so `--smoke` arrives as argv[1] — which is the slot main.cpp tests.
-NMOUT=$("$CW_NM" --defined-only "$LIB" 2>/dev/null)
-if ! printf '%s\n' "$NMOUT" | grep -q ' Java_org_libsdl_app_SDLActivity_nativeRunMain$'; then
+# Guarded, because an nm that cannot read the archive leaves NMOUT empty, and an empty NMOUT makes
+# the check below report "libSDL2.a does not define nativeRunMain" — a statement about SDL's
+# contents that would be a lie about a tool failure. Two different problems, two different messages.
+NMOUT=$("$CW_NM" --defined-only "$LIB" 2>/dev/null) \
+    || { echo "FAIL: llvm-nm could not read $LIB, so the symbol checks cannot run at all." >&2
+         echo "      $LIB is $(stat -c%s "$LIB" 2>/dev/null || echo 'not a file')." >&2
+         echo "      This is a tool or path failure, not a statement about what SDL defines." >&2
+         exit 1; }
+#
+# MATCHED WITH A HERE-STRING AND NEVER WITH A PIPE. `printf '%s\n' "$NMOUT" | grep -q SYM` reports
+# the symbol MISSING when the symbol is PRESENT, and it did exactly that in CI, on a library that
+# was correct. The mechanism: grep -q exits the instant it matches; printf is still writing
+# libSDL2.a's symbol table — over a megabyte — into a pipe whose buffer is 64 KiB; the write fails
+# with EPIPE; bash prints "printf: write error: Broken pipe" and exits printf non-zero; `set -o
+# pipefail` makes that the pipeline's status; and the `if !` inverts it into "not found". So the
+# broken pipe is not a symptom of the failure, it is PROOF THE SYMBOL WAS FOUND — grep only stops
+# reading early when it has matched.
+#
+# It only bites when the match is early enough that the producer is still writing, which is why a
+# small test case passes and the real archive does not. A here-string has no pipe and no producer to
+# interrupt. The same shape silently defeats the NEGATIVE check below in the opposite direction: an
+# early SDL_main would make grep exit 0 and printf die, the pipeline would report non-zero, and the
+# duplicate symbol this check exists to catch would sail through unremarked.
+if ! grep -q ' Java_org_libsdl_app_SDLActivity_nativeRunMain$' <<<"$NMOUT"; then
     echo "FAIL: libSDL2.a does not define Java_org_libsdl_app_SDLActivity_nativeRunMain." >&2
     echo "      That symbol comes from src/core/android/SDL_android.c, so SDL's Android core" >&2
     echo "      did not make it into this build." >&2
     exit 1
 fi
-if printf '%s\n' "$NMOUT" | grep -q ' SDL_main$'; then
+if grep -q ' SDL_main$' <<<"$NMOUT"; then
     echo "FAIL: libSDL2.a DEFINES SDL_main, and host/android_bridge.cpp defines it too — a" >&2
     echo "      duplicate symbol at the link of libcw_runtime.so. This SDL2 version put the" >&2
     echo "      Android main back into the library; either drop ours or stop linking this one." >&2

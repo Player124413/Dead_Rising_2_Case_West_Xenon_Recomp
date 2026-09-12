@@ -155,8 +155,13 @@ echo "==> verifying"
 # The two functions gpu/vk_shadow_android.cpp calls, checked as symbols in the archive: a
 # header that declares them and a library that does not define them is a link error in a build
 # 228 translation units deep, i.e. a long wait to be told something this check knows now.
+# Captured, then matched with a here-string rather than piped into grep -q: under pipefail that pipe
+# reports a symbol missing when it is present, because grep -q exits on match and leaves nm writing
+# into a closed pipe. build_sdl2_android.sh has the full account; it cost a CI run there.
+NMOUT=$("$CW_NM" --defined-only "$PREFIX/lib/libadrenotools.a" 2>/dev/null) \
+    || { echo "FAIL: llvm-nm could not read $PREFIX/lib/libadrenotools.a." >&2; exit 1; }
 for sym in adrenotools_open_libvulkan adrenotools_get_bcn_type adrenotools_patch_bcn; do
-    if ! "$CW_NM" --defined-only "$PREFIX/lib/libadrenotools.a" 2>/dev/null | grep -q "$sym"; then
+    if ! grep -q "$sym" <<<"$NMOUT"; then
         echo "FAIL: libadrenotools.a does not define $sym." >&2
         exit 1
     fi

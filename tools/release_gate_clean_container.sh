@@ -261,8 +261,11 @@ if [ "$APPIMAGE_MODE" = 1 ]; then
     echo "    $ai_smoke"
     ai_root=$( (cd /tmp/beside && CW_LAUNCHER=0 CW_NO_WINDOW=1 CW_NO_AUDIO_OUT=1 timeout 30 ./cz.AppImage --appimage-extract-and-run 2>&1) | grep -m1 '^\[paths\] root' || true)
     echo "    $ai_root"
-    if echo "$ai_smoke" | grep -q "OK: every generated symbol resolved" \
-       && echo "$ai_root" | grep -q "root /tmp/beside (appimage)" \
+    # Here-strings, not pipes: this script declares pipefail, and a pipe into grep -q reports the
+    # pattern absent when it is present early, because grep -q exits on match and the producer dies
+    # with EPIPE. See the account in tools/android/build_sdl2_android.sh, where it cost a CI run.
+    if grep -q "OK: every generated symbol resolved" <<<"$ai_smoke" \
+       && grep -q "root /tmp/beside (appimage)" <<<"$ai_root" \
        && [ -f /tmp/beside/assets/package/PUT_YOUR_GAME_HERE.txt ]; then
         echo "    appimage-run OK (smoke through AppRun, root beside the image, assets/package/ seeded)"
     else

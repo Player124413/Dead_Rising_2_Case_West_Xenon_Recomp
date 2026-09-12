@@ -142,20 +142,23 @@ trap 'rm -rf "$T"' EXIT
 cp "$IMG" "$T/cz.AppImage"
 smoke=$( (cd "$T" && ./cz.AppImage --appimage-extract-and-run --smoke 2>&1) | tail -1)
 echo "    $smoke"
-echo "$smoke" | grep -q "OK: every generated symbol resolved" || fail "the packaged binary did not pass --smoke through the AppImage"
+# Here-strings rather than `echo | grep -q`: this script declares pipefail, under which that pipe
+# reports the pattern absent when it is present, because grep -q exits on match and echo dies with
+# EPIPE. tools/android/build_sdl2_android.sh has the account; it cost a CI run there.
+grep -q "OK: every generated symbol resolved" <<<"$smoke" || fail "the packaged binary did not pass --smoke through the AppImage"
 echo "==> self-check: the data root resolves BESIDE the image, and assets/package/ is seeded"
 # CW_LAUNCHER=0 CW_NO_WINDOW=1, or the shipped cw_defaults.env opens the launcher window
 # on this desktop and the check waits for a player who is not there (it did, part 104).
 rootline=$( (cd "$T" && CW_LAUNCHER=0 CW_NO_WINDOW=1 CW_NO_AUDIO_OUT=1 timeout 30 ./cz.AppImage --appimage-extract-and-run 2>&1) | grep -m1 '^\[paths\] root' || true)
 echo "    $rootline"
-echo "$rootline" | grep -q "root $T (appimage)" || fail "the root did not resolve beside the AppImage (host_paths step 1b)"
+grep -q "root $T (appimage)" <<<"$rootline" || fail "the root did not resolve beside the AppImage (host_paths step 1b)"
 [ -f "$T/assets/package/PUT_YOUR_GAME_HERE.txt" ] || fail "AppRun did not seed assets/package/ beside the image"
 echo "    $T/assets/package/PUT_YOUR_GAME_HERE.txt seeded"
 if [ -e /dev/fuse ]; then
     echo "==> self-check: the FUSE mount path (what a player's double-click does)"
     fsmoke=$( (cd "$T" && ./cz.AppImage --smoke 2>&1) | tail -1)
     echo "    $fsmoke"
-    echo "$fsmoke" | grep -q "OK: every generated symbol resolved" || fail "the FUSE-mounted AppImage did not pass --smoke"
+    grep -q "OK: every generated symbol resolved" <<<"$fsmoke" || fail "the FUSE-mounted AppImage did not pass --smoke"
 else
     echo "==> (no /dev/fuse here: the FUSE mount path is not exercised on this machine)"
 fi

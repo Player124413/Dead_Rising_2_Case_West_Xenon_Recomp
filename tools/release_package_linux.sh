@@ -106,7 +106,7 @@ done
 # one, because a class of defect that has bitten once should have a check that names it
 # rather than a symptom somebody has to interpret.
 if [ -f "$STAGE/lib/libSDL2-2.0.so.0" ] \
-   && strings "$STAGE/lib/libSDL2-2.0.so.0" | grep -q libSDL3; then
+   && grep -q libSDL3 "$STAGE/lib/libSDL2-2.0.so.0"; then
     fail "the bundled libSDL2 is sdl2-compat (it dlopens libSDL3, which ldd cannot see).
   Build real SDL2 and point the release tree at it:
     tools/build_sdl2.sh

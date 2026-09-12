@@ -336,7 +336,10 @@ echo "==> verifying $APK"
 LIST=$(unzip -l "$APK")
 
 check_in_apk() {
-    if printf '%s\n' "$LIST" | grep -q "$1"; then
+    # Here-string, not a pipe: `printf | grep -q` under the pipefail this script declares reports a
+    # missing entry when the entry is PRESENT, because grep -q exits on match and printf dies with
+    # EPIPE on a listing long enough to still be in flight. See build_sdl2_android.sh.
+    if grep -q "$1" <<<"$LIST"; then
         echo "    present           $1"
     else
         echo "FAIL: $APK does not contain $1 — $2" >&2
@@ -363,9 +366,9 @@ fi
 AAPT=$(find "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/nonexistent}}/build-tools" -name aapt2 2>/dev/null | sort -V | tail -1 || true)
 if [ -n "$AAPT" ]; then
     MANIFEST=$("$AAPT" dump xmltree --file AndroidManifest.xml "$APK" 2>/dev/null || true)
-    if printf '%s' "$MANIFEST" | grep -q 'extractNativeLibs.*0xffffffff'; then
+    if grep -q 'extractNativeLibs.*0xffffffff' <<<"$MANIFEST"; then
         echo "    extractNativeLibs true (0xffffffff)"
-    elif printf '%s' "$MANIFEST" | grep -q 'extractNativeLibs'; then
+    elif grep -q 'extractNativeLibs' <<<"$MANIFEST"; then
         echo "FAIL: extractNativeLibs is not true in $APK." >&2
         echo "      adrenotools needs real files in nativeLibraryDir; packaging.jniLibs." >&2
         echo "      useLegacyPackaging must stay true in android/app/build.gradle.kts." >&2

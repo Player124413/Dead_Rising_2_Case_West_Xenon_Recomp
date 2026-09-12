@@ -168,7 +168,13 @@ fi
 # The one symbol the runtime dlsyms. A libdxcompiler.so that loads but does not export it makes
 # LoadDxcOnce skip the candidate and report "no dxcompiler library found" for a file that exists,
 # which is a confusing place to end up after an hour of building.
-if ! "$CW_NM" -D --defined-only "$DXC" 2>/dev/null | grep -q 'DxcCreateInstance'; then
+# Here-string, not a pipe: `nm | grep -q` under pipefail reports the symbol missing when it is
+# present, because grep -q stops reading the moment it matches and nm dies on a closed pipe. The
+# dynamic symbol table here is small enough that it would probably never bite, but a check that is
+# correct only for small inputs is a check whose behaviour depends on the thing it verifies.
+NMOUT=$("$CW_NM" -D --defined-only "$DXC" 2>/dev/null) \
+    || { echo "FAIL: llvm-nm could not read $DXC." >&2; exit 1; }
+if ! grep -q 'DxcCreateInstance' <<<"$NMOUT"; then
     echo "FAIL: $DXC does not export DxcCreateInstance." >&2
     echo "      gpu/shader_translator.cpp dlsyms exactly that symbol; without it the library" >&2
     echo "      is skipped and every shader translation is refused." >&2

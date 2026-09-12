@@ -83,7 +83,11 @@ done
 [ -n "$LIBDIR" ] || { echo "FAIL: no libSDL2-2.0.so.0 under $PREFIX/{lib,lib64}" >&2; exit 1; }
 SO=$(readlink -f "$LIBDIR/libSDL2-2.0.so.0")
 
-if strings "$SO" | grep -q 'libSDL3'; then
+# grep reads the library directly rather than `strings` feeding it through a pipe: under the
+# pipefail this script declares, `strings | grep -q` reports "not found" when the string IS found
+# early, because grep -q exits on match and strings dies with EPIPE still writing a multi-megabyte
+# .so. The pattern is seven printable bytes, so searching the file is the same question.
+if grep -q 'libSDL3' "$SO"; then
     echo "FAIL: the built libSDL2 still mentions libSDL3 -- this is the shim, not SDL2." >&2
     exit 1
 fi

@@ -511,6 +511,37 @@ one annotation rather than one per line because GitHub keeps at most ten error a
 so the obvious `while read` loop discards thirty of the forty lines it exists to preserve — and what
 it discards is everything after the tenth, which is where a compiler's first diagnostic is.
 
+**Two verification checks in `tools/android/` were wrong in opposite directions, and both were wrong
+about being checks.** The first tested whether `libSDL2.a` was position-independent by grepping `nm`
+output for a *relocation type* — `nm` prints symbols and never relocations, so the pattern could not
+match anything and the check could not fail. It now reads `SDL_STATIC_PIC:BOOL=ON` out of SDL's own
+`CMakeCache.txt`. The second reported that `libSDL2.a` was missing the JNI symbol it demonstrably
+contained:
+
+```sh
+if ! printf '%s\n' "$NMOUT" | grep -q ' Java_org_..._nativeRunMain$'; then   # WRONG
+if ! grep -q ' Java_org_..._nativeRunMain$' <<<"$NMOUT"; then               # right
+```
+
+Under the `set -euo pipefail` every script here declares, `grep -q` exits the instant it matches,
+the producer is still writing an archive's symbol table — over a megabyte — into a pipe whose buffer
+is 64 KiB, the write fails with EPIPE, bash reports `printf: write error: Broken pipe` and exits the
+producer non-zero, `pipefail` makes that the pipeline's status, and `if !` inverts it into "not
+found". **The broken pipe is not a symptom of the failure; it is proof the symbol was found**,
+because grep only stops reading early when it has matched. It bites only when the match is early
+enough that the producer is still in flight, which is why a small test case passes and the real
+archive does not — and why the bug survived being written, reviewed and reasoned about. The same
+shape defeats a *negative* check in the opposite direction: an early `SDL_main` would have made the
+duplicate-symbol guard sail through unremarked, so both directions of that pair were broken at once.
+
+The rule these scripts now follow is that **nothing pipes into `grep -q`**. A here-string when the
+input is already a variable; a file when it is a command's output, which in
+`build_ffmpeg_android.sh` also means running `nm` once on `libavcodec.a` instead of three times in a
+loop; and `grep` reading a binary directly where the old code went through `strings`, which is the
+same question for a seven-byte printable pattern. A repo-wide scan for the shape under `pipefail`
+returns one deliberate exception, `ldd "$BUILD/cw_runtime" | grep -q`, whose producer emits a few
+dozen lines and so cannot still be writing when grep leaves.
+
 **Shaders are two steps, and they are the difference between an APK that boots and one that draws.**
 §5.4 is the argument; the mechanics here are that the job builds the *cache* on the runner with the
 x86_64 DXC XenosRecomp already vendors, and cross-compiles DXC *itself* for arm64 so the phone can
