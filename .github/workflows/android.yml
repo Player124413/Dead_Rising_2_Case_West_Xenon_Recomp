@@ -236,6 +236,22 @@ jobs:
           # key, and that the wrong key yields an empty Image with no diagnostic at all. The patch
           # is what makes Xex2LoadImage try both.
           git -C ../XenonRecomp apply "$PWD/tools/ci/xenonrecomp-local.patch"
+          # Assert the __rdtsc guard actually landed. `git apply` is context-strict, so a
+          # drifted hunk fails loudly on the line above; what this catches is a REGENERATED
+          # patch that silently dropped the hunk. Without it the failure surfaces as
+          # "redefinition of 'guest_ticks'" in all 230 recompiled TUs on arm64 — an error
+          # that names neither the patch nor this step, which is how a one-line omission
+          # becomes an hour of reading compiler output. Contract documented in
+          # runtime/cpu/timebase.h.
+          if ! grep -qF '!defined(__rdtsc)' ../XenonRecomp/XenonUtils/ppc_context.h; then
+            echo "::error::tools/ci/xenonrecomp-local.patch applied, but XenonUtils/ppc_context.h"
+            echo "::error::carries no '!defined(__rdtsc)' guard. On arm64 that header defines its"
+            echo "::error::own __rdtsc(), and runtime/cpu/timebase.h is force-included ahead of it"
+            echo "::error::with '#define __rdtsc() (cw_timebase::guest_ticks())', which rewrites the"
+            echo "::error::definition itself. Restore the guard hunk in the patch."
+            exit 1
+          fi
+          echo "asserted: ppc_context.h guards its __rdtsc definition against a shim macro"
           git clone https://github.com/hedge-dev/XenosRecomp ../XenosRecomp
           git -C ../XenosRecomp checkout $XENOS_BASE
           git -C ../XenosRecomp submodule update --init thirdparty/dxc-bin

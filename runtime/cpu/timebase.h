@@ -33,6 +33,18 @@
 // error that names neither this file nor the guest. Including it here first sets
 // the include guard, so the later simde include is a no-op and the macro below
 // only ever rewrites call sites.
+//
+// ARM64 has the same hazard arriving from the other direction, and no intrinsics
+// header that can pre-empt it: XenonRecomp's ppc_context.h *defines*
+// `inline uint64_t __rdtsc()` there (a cntvct_el0 read), so a macro already in
+// scope rewrites that definition into `inline uint64_t (cw_timebase::guest_ticks())`
+// — which the compiler parses as an out-of-line definition of our own function and
+// reports as "redefinition of 'guest_ticks'", in every recompiled TU at once,
+// naming neither this file nor the guest. tools/ci/xenonrecomp-local.patch guards
+// that definition with `!defined(__rdtsc)` so it is not emitted when a shim already
+// supplies one. This header is the other half of that contract: on an architecture
+// whose ppc_context.h defines __rdtsc unguarded, the macro below must not exist yet
+// when that header is read.
 #if defined(__x86_64__) || defined(_M_X64)
 #include <x86intrin.h>
 #endif
@@ -94,6 +106,11 @@ inline uint64_t guest_ticks()
 }  // namespace cw_timebase
 
 // Shadow __rdtsc for the recompiled sources. Force-include ordering puts this
-// ahead of ppc_context.h, so every `mftb` in the image binds here.
+// ahead of ppc_context.h, so every `mftb` in the image binds here — on ARM64 too,
+// where the alternative is the guest reading cntvct_el0 at the host timer's rate
+// (19.2 MHz or 24 MHz depending on the phone) instead of the 49.875 MHz the title
+// was written against: a clock that is wrong by a factor nothing in the guest can
+// detect, since every value it derives stays self-consistent. See the ARM64 note
+// above for why ppc_context.h must not define its own __rdtsc once this exists.
 #undef __rdtsc
 #define __rdtsc() (cw_timebase::guest_ticks())

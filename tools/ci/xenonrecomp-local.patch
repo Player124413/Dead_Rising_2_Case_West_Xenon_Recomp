@@ -934,7 +934,7 @@ index 534e503..22a761f 100644
  
  struct RecompilerMidAsmHook
 diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
-index 31a86cd..75a73d1 100644
+index 31a86cd..21645c9 100644
 --- a/XenonUtils/ppc_context.h
 +++ b/XenonUtils/ppc_context.h
 @@ -5,10 +5,12 @@
@@ -999,7 +999,7 @@ index 31a86cd..75a73d1 100644
  typedef void PPCFunc(struct PPCContext& __restrict__ ctx, uint8_t* base);
  
  struct PPCFuncMapping
-@@ -682,6 +718,22 @@ inline simde__m128i simde_mm_vctsxs(simde__m128 src1)
+@@ -682,13 +718,35 @@ inline simde__m128i simde_mm_vctsxs(simde__m128 src1)
      return simde_mm_andnot_si128(simde_mm_castps_si128(xmm2), simde_mm_castps_si128(dest));
  }
  
@@ -1022,6 +1022,29 @@ index 31a86cd..75a73d1 100644
  inline simde__m128i simde_mm_vsr(simde__m128i a, simde__m128i b)
  {
      b = simde_mm_srli_epi64(simde_mm_slli_epi64(b, 61), 61);
+     return simde_mm_castps_si128(simde_mm_insert_ps(simde_mm_castsi128_ps(simde_mm_srl_epi64(a, b)), simde_mm_castsi128_ps(simde_mm_srl_epi64(simde_mm_srli_si128(a, 4), b)), 0x10));
+ }
+ 
+-#if defined(__aarch64__) || defined(_M_ARM64)
++// A host runtime may force-include a shim that redirects the guest's timebase reads:
++// Case West's runtime/cpu/timebase.h defines __rdtsc() as a macro so that mftb is
++// scaled to the Xenon's 49.875 MHz rather than the host counter's rate. Such a shim
++// is included BEFORE this header, so the definition below must be suppressed when
++// __rdtsc is already a macro - otherwise the macro expands inside its own definition
++// and the compiler reads it as an out-of-line definition of the shim's function.
++#if (defined(__aarch64__) || defined(_M_ARM64)) && !defined(__rdtsc)
+ inline uint64_t __rdtsc()
+ {
+     uint64_t ret;
+@@ -696,7 +754,7 @@ inline uint64_t __rdtsc()
+                  : "=r"(ret)::"memory");
+     return ret;
+ }
+-#elif !defined(__x86_64__) && !defined(_M_X64)
++#elif !defined(__x86_64__) && !defined(_M_X64) && !defined(__rdtsc)
+ #   error "Missing implementation for __rdtsc()"
+ #endif
+ 
 diff --git a/XenonUtils/xex.cpp b/XenonUtils/xex.cpp
 index 4e79042..0ec7116 100644
 --- a/XenonUtils/xex.cpp
