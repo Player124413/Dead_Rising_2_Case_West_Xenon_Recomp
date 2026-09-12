@@ -51,7 +51,7 @@ on:
 
       # --- the playable build. See the `playable` job for what these actually buy. ---
       xex_url:
-        description: "DIRECT download URL for default.xex (or the STFS package). Leave empty to use the CW_XEX_URL secret. On a PUBLIC repo this field is visible on the run page."
+        description: "DIRECT download URL. Give the STFS PACKAGE, not a bare default.xex: the package also carries data/shaders/*.big, which is the only source the shader cache can be built from. Leave empty to use the CW_XEX_URL secret. On a PUBLIC repo this field is visible on the run page."
         type: string
         default: ""
       xex_sha256:
@@ -344,12 +344,13 @@ jobs:
   # with the PATCHED host XenonRecomp, verify the generation actually happened, cross-compile the
   # four dependencies, and build an APK whose guest image is the title's own 58k functions.
   #
-  # WHAT IT STILL DOES NOT GIVE YOU: shaders. The SPIR-V cache in assets/shader_spv is built by
-  # tools/build_shader_spv.sh from a microcode dump that only exists after the RUNTIME has played
-  # the game once (CZ_SHADER_DUMP), so it cannot be produced here from a XEX; and there is no
-  # prebuilt arm64 libdxcompiler.so anywhere to translate on the phone instead. The APK boots,
-  # loads the real image and refuses each shader translation with one log line — see the closing
-  # summary this job prints, which names both ways to fix it.
+  # WHAT IT STILL DOES NOT GIVE YOU: shaders. Both paths that produce them need DXC — the
+  # first-run disc pass (gpu/shader_prebuild.cpp) reads data/shaders/deadrisingepilogue-{ps,vs}.big
+  # out of the PACKAGE, and the translate-on-first-sight path needs a library the phone does not
+  # have, there being no prebuilt arm64 libdxcompiler.so anywhere. So a dispatch that supplies a
+  # bare default.xex gets a correct ppc/ and no cache at all: the banks are not in the executable.
+  # The APK boots, loads the real image and refuses each shader translation with one log line — see
+  # the closing summary this job prints, which names both ways to fix it.
   # -----------------------------------------------------------------------------------------
   playable:
     if: github.event_name == 'workflow_dispatch'
@@ -562,15 +563,20 @@ jobs:
           echo "abi         : ${{ inputs.abi }}"
           echo "published   : ${{ inputs.artifact }}"
           echo
-          echo "It will boot, run the title's own code, and reach the renderer. It will then"
-          echo "refuse every shader translation, because shaders are the one input this job"
-          echo "cannot produce from a XEX:"
+          echo "It will boot, run the title's own code, and reach the renderer. Whether it"
+          echo "draws anything depends on DXC, which nothing on this runner can supply for"
+          echo "arm64: BOTH shader paths go through it."
           echo
-          echo "  * assets/shader_spv is built by tools/build_shader_spv.sh from a MICROCODE"
-          echo "    DUMP, and a dump only exists after the runtime has played the game once"
-          echo "    (CZ_SHADER_DUMP=<dir>). There is nothing in a XEX to dump from."
-          echo "  * the alternative is translating on the phone, which needs an arm64"
-          echo "    libdxcompiler.so, and Microsoft ships dxc for x86/x64 Linux only."
+          echo "  * The first-run pass (gpu/shader_prebuild.cpp) builds the cache headlessly"
+          echo "    from the game's own banks, data/shaders/deadrisingepilogue-{ps,vs}.big —"
+          echo "    so it needs the PACKAGE, not a bare default.xex, and it needs DXC to"
+          echo "    translate what it decodes."
+          echo "  * The vertex half additionally needs tools/release/vs_recipes.bin, which is"
+          echo "    NOT in this repository: tools/vs_recipes.py generates it from a microcode"
+          echo "    dump of a machine that has run the game. Without it the pass is"
+          echo "    pixel-only and every vertex shader falls to first sight, on the phone."
+          echo "  * On the phone, translating means an arm64 libdxcompiler.so, and Microsoft"
+          echo "    ships dxc for x86/x64 Linux only."
           echo
           echo "Two ways to finish it, pick one:"
           echo
