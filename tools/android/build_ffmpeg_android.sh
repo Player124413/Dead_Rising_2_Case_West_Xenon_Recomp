@@ -145,9 +145,35 @@ AVU="$PREFIX/lib/libavutil.a"
 [ -f "$AVC" ] || { echo "FAIL: no $AVC" >&2; exit 1; }
 [ -f "$AVU" ] || { echo "FAIL: no $AVU" >&2; exit 1; }
 
-# The decoder has to be IN the archive. --enable-decoder=xma2 is a request, and a request that
+# The decoders have to be IN the archive. --enable-decoder=xma2 is a request, and a request that
 # was not honoured produces a library that links and a game with no music — which is the exact
 # shape of defect this project refuses at build time rather than discovers at play time.
+#
+# Checked against ffmpeg's own record AND the archive, because the first version of this check asked
+# for a NAME THAT DOES NOT EXIST and reported a missing decoder in a library that had it — which is
+# what stopped both the arm64 and the x86_64 build:
+#
+#   * ffmpeg's internal symbols carry an ff_ prefix. The XMA2 AVCodec is ff_xma2_decoder, declared
+#     as exactly that in libavcodec/allcodecs.c, and a grep for " xma2_decoder$" cannot match it:
+#     the character before the name is an underscore, not the space the pattern demanded.
+#   * It does not live in an object called xma2dec.o either. OBJS-$(CONFIG_XMA2_DECODER) in
+#     libavcodec/Makefile is wmaprodec.o, wma.o and wma_common.o, and ffmpeg 8.1.2 has no xma2dec.c
+#     at all. So an object-name check inferred from the decoder's name would have been wrong in the
+#     same way; the names here come from ffmpeg's sources, not from the shape of the flag.
+#   * ffbuild/config.mak is read as well, for the reason the PIC check above reads it: a flag we
+#     passed is a request, and that file is ffmpeg's answer to it.
+[ -f "$BUILD/ffbuild/config.mak" ] \
+    || { echo "FAIL: no $BUILD/ffbuild/config.mak, so what configure decided cannot be read." >&2
+         exit 1; }
+for dec in XMA1 XMA2; do
+    grep -q "^CONFIG_${dec}_DECODER=yes" "$BUILD/ffbuild/config.mak" \
+        || { echo "FAIL: configure did not enable the ${dec} decoder, so --enable-decoder was not" >&2
+             echo "      honoured. $BUILD/ffbuild/config.mak is ffmpeg's own record of the" >&2
+             echo "      decision; $BUILD/configure.log has the run that made it." >&2
+             exit 1; }
+done
+echo "    CONFIG_XMA1_DECODER=yes, CONFIG_XMA2_DECODER=yes (from ffbuild/config.mak)"
+
 # nm's output goes to a file and grep reads the file; it is NOT piped into grep -q. Under the
 # `set -o pipefail` this script declares, a pipe into grep -q reports a symbol missing when it is
 # present: grep -q exits the moment it matches, nm is still writing a 20 MB archive's symbol table
@@ -160,10 +186,13 @@ trap 'rm -f "$NMTXT"' EXIT
 "$CW_NM" --defined-only "$AVC" >"$NMTXT" 2>/dev/null \
     || { echo "FAIL: llvm-nm could not read $AVC, so the decoder check cannot run at all." >&2
          exit 1; }
-for sym in xma2_decoder xma1_decoder avcodec_find_decoder; do
+for sym in ff_xma2_decoder ff_xma1_decoder avcodec_find_decoder; do
     if ! grep -q " $sym\$" "$NMTXT"; then
         echo "FAIL: libavcodec.a does not define $sym." >&2
-        echo "      Check $BUILD/configure.log for what --disable-everything turned off." >&2
+        echo "      The first two are ffmpeg's internal AVCodec objects — the ff_ prefix is" >&2
+        echo "      ffmpeg's, not ours — and the third is the public entry point" >&2
+        echo "      runtime/audio/xma_decoder.cpp calls. Check $BUILD/configure.log for what" >&2
+        echo "      --disable-everything turned off." >&2
         exit 1
     fi
 done

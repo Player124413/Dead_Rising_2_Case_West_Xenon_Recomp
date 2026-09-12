@@ -120,6 +120,23 @@ if grep -q '^#define CONFIG_NONFREE 1' config.h; then
     exit 1
 fi
 echo "    licence: CONFIG_GPL=0 CONFIG_NONFREE=0  (LGPL 2.1+)"
+
+# THE DECODER CHECK, and the same discipline: what configure DECIDED, read out of ffmpeg's own
+# config.h, not what we asked it for on the command line. --enable-decoder=xma2 is a request, and
+# a request that was not honoured produces a library that links, an executable that runs, and a
+# game with no music — nothing fails anywhere until somebody plays it. The Android script checks
+# the same property and got the NAME wrong while doing it (ffmpeg's internals are ff_-prefixed, and
+# the XMA decoders live in wmaprodec.o, not in an xma2dec.o that does not exist), which is why this
+# one reads config.h instead of grepping symbols: the macro name cannot drift the way a symbol
+# name can, and it is the same file the licence check above already trusts.
+for dec in XMA1 XMA2; do
+    grep -q "^#define CONFIG_${dec}_DECODER 1" config.h \
+        || { echo "FAIL: configure did not enable the ${dec} decoder, so --enable-decoder was not" >&2
+             echo "      honoured and this library cannot decode the game's music. config.h is" >&2
+             echo "      ffmpeg's own record; $BUILD/configure.log has the run that made it." >&2
+             exit 1; }
+done
+echo "    decoders: CONFIG_XMA1_DECODER=1 CONFIG_XMA2_DECODER=1  (from config.h)"
 if [ -n "$ASMFLAG" ]; then
     echo "    x86 assembly: DISABLED (no nasm/yasm) — see the warning above"
 else
@@ -129,7 +146,15 @@ fi
 echo "==> building"
 make -j"$(nproc)" >"$BUILD/make.log" 2>&1 || { tail -40 "$BUILD/make.log"; exit 1; }
 rm -rf "$PREFIX"
-make install >>"$BUILD/make.log" 2>&1
+# Guarded like the make above it: under the `set -euo pipefail` this script declares, an unguarded
+# failure ends it without printing a word, and the only record is in $BUILD/make.log, which nothing
+# upstream reads. The line above has just deleted $PREFIX, so the silent version leaves no prefix
+# and no reason. The Android script had the same hole.
+make install >>"$BUILD/make.log" 2>&1 \
+    || { echo "FAIL: make install did not populate $PREFIX." >&2
+         echo "      $PREFIX was deleted immediately before this. Last 40 lines of" >&2
+         echo "      $BUILD/make.log:" >&2
+         tail -40 "$BUILD/make.log"; exit 1; }
 
 # THE SIZE CHECK, stated as a threshold rather than printed for someone to eyeball.
 # The system build's closure is 120 objects. If ours is anywhere near that, the

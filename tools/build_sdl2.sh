@@ -66,7 +66,12 @@ echo "==> building"
 cmake --build "$WORK/build" -j"$(nproc)" >"$WORK/make.log" 2>&1 \
     || { tail -30 "$WORK/make.log"; exit 1; }
 rm -rf "$PREFIX"
-cmake --install "$WORK/build" >>"$WORK/make.log" 2>&1
+# Guarded like the build above it: under this script's `set -euo pipefail` an unguarded failure
+# ends it without printing a word, and the only record is in make.log, which nothing upstream reads.
+cmake --install "$WORK/build" >>"$WORK/make.log" 2>&1 \
+    || { echo "FAIL: cmake --install did not install SDL2 into $PREFIX." >&2
+         echo "      Last 40 lines of $WORK/make.log:" >&2
+         tail -40 "$WORK/make.log"; exit 1; }
 
 # THE CHECK THAT WOULD HAVE CAUGHT THE ORIGINAL DEFECT, stated as the property rather
 # than as the symptom: this library must not reach for SDL3 by any route -- neither a

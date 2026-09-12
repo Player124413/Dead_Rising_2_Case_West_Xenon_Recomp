@@ -29,8 +29,8 @@
 #
 # is therefore self-defeating: it discards thirty of the forty lines it was written to preserve, and
 # the discard is not the tail, it is everything after line ten, which is where the first diagnostic
-# in a compiler's output lives. So the tail is joined into a SINGLE message with %0A, the annotation
-# encoding for a newline, and one annotation is spent saying all of it.
+# in a compiler's output lives. So the extract is joined into a SINGLE message with %0A, the
+# annotation encoding for a newline, and one annotation is spent saying all of it.
 #
 # The percent escaping has to happen before the join, not after, because the escaping itself
 # introduces percents: `%` -> `%25` first, then carriage returns, then the newlines that separate
@@ -59,9 +59,30 @@ printf '\n$ %s\n' "$*" >>"$LOG"
 rc=${PIPESTATUS[0]}
 
 if [ "$rc" -ne 0 ]; then
-    msg=$(tail -n 40 "$LOG" |
-        awk '{gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%s", (NR > 1 ? "%0A" : ""), $0}')
-    echo "::error::$* exited $rc. The last 40 lines of $LOG follow.%0A%0A$msg"
+    # TWO extracts, because a parallel build does not put the cause at the end. ninja -j4
+    # interleaves, so the FAILED block for the target that broke can sit hundreds of lines above the
+    # last line printed; and a link command is a SINGLE line long enough to consume the whole
+    # annotation by itself. That is what happened to the first link failure this wrapper caught: the
+    # message ended in the middle of the command line and the undefined symbols printed after it
+    # were never sent, so the annotation cost a run and said nothing. So — every line that looks
+    # like a diagnostic, from anywhere in the log, then the tail; and every line CLIPPED, because
+    # forty short lines carry more information than one long one.
+    diag=$(grep -n -E 'error:|Error [0-9]+|undefined reference|undefined symbol|FAILED:|cannot find|ld(\.lld)?:|fatal|No such file' \
+        "$LOG" 2>/dev/null | tail -n 20 | cut -c1-300 || true)
+    # The pipe is INSIDE the command substitution, which is not a stylistic detail. Written as
+    # `msg=$( ... ) | awk ...`, the left side of a pipeline runs in a subshell, so msg is assigned
+    # there and is unset here — and under `set -u` the script then dies on the next line, without
+    # printing the annotation it exists to print. That version passed `bash -n`, was written by
+    # somebody who knew what pipefail does to a pipeline, and was caught only by running it.
+    msg=$(
+        {
+            if [ -n "$diag" ]; then
+                printf 'lines matching a diagnostic pattern, from anywhere in the log:\n%s\n\nlast 25 lines:\n' "$diag"
+            fi
+            tail -n 25 "$LOG" | cut -c1-300
+        } | awk '{gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%s", (NR > 1 ? "%0A" : ""), $0}'
+    )
+    echo "::error::$* exited $rc. Diagnostics and tail of $LOG follow.%0A%0A$msg"
 fi
 
 exit "$rc"
