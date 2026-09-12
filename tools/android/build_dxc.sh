@@ -112,8 +112,9 @@ git -C "$SRC" log -1 --format='    commit %h  %ad  %s' --date=short
 #   * external/CMakeLists.txt guards the requirement with `if(IS_DIRECTORY .../DirectX-Headers)` and
 #     an else() FATAL_ERROR — but git leaves an unpopulated submodule as an EMPTY DIRECTORY, so the
 #     test passed, DIRECTX_HEADER_INCLUDE_DIR was set to a directory with nothing in it, and the
-#     configure that should have refused produced a build that fails at [574/1327] of a step that had
-#     by then run forty minutes:
+#     configure that should have refused produced a build that fails at [574/1327] — by which point
+#     the step had cloned DXC, built both host tblgens, configured the cross build and compiled 573
+#     arm64 translation units, all to report one missing header:
 #
 #         D3DReflection.h:21:10: fatal error: 'd3d12shader.h' file not found
 #
@@ -130,7 +131,7 @@ done
 # Check the FILE, not the directory. A directory is what DXC's own configure tests and what an empty
 # submodule provides, which is exactly why that test passed on a tree that could not compile. It is
 # checked here rather than after the configure because it is a property of the source tree, and here
-# is seconds instead of the forty minutes the build needed to reach the same conclusion.
+# is seconds instead of the four and a half minutes the build needed to reach the same conclusion.
 DXH=$SRC/external/DirectX-Headers/include
 if [ ! -f "$DXH/directx/d3d12shader.h" ]; then
     echo "FAIL: $DXH/directx/d3d12shader.h is missing." >&2
@@ -389,11 +390,14 @@ grep -q 'ANDROID_STL:.*c++_shared' "$BUILD/CMakeCache.txt" \
     || echo "    WARNING: CMakeCache does not record c++_shared — check the STL before shipping."
 
 echo "==> building dxcompiler (this is the long step)"
-# -k 20 instead of ninja's default, which stops at the first failing edge. This step is forty-odd
-# minutes of a six-hour budget and re-dispatching it is a human action, so the question it has to
-# answer is not "does it build" but "how many things are wrong with it": a build that stops at the
-# first missing header costs one run per error, and the run that found D3DReflection.h had compiled
-# 573 translation units to say one thing. Twenty is enough to tell one cause from several and bounds
+# -k 20 instead of ninja's default, which stops at the first failing edge. Measured, this step is not
+# the hours a build called "LLVM" suggests: the run that found D3DReflection.h reached [574/1327] four
+# minutes forty-six seconds after it started, from a cold clone of DXC through both host tblgens, the
+# cross configure and 573 arm64 translation units. What is expensive is the run around it — eight and
+# a half minutes to download the game image, and a dispatch that a person has to click — so the
+# question this step has to answer is not "does it build" but "how many things are wrong with it": a
+# build that stops at the first missing header costs one run per error, and that run compiled 573
+# translation units to say one thing. Twenty is enough to tell one cause from several and bounds
 # the waste when the cause is catastrophic. On failure every FAILED edge is listed, not just the last
 # screenful — grep -m rather than `grep | head`, because head exits on its twentieth line and grep
 # dies on the closed pipe, which under the pipefail this script declares reports fewer errors than
