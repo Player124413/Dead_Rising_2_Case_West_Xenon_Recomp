@@ -76,15 +76,41 @@ cmake -S "$XENON" -B "$BUILD" -G Ninja \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     >"$BUILD/configure.log" 2>&1 || { tail -40 "$BUILD/configure.log"; exit 1; }
 
-# PIC, verified against the cache this script's own configure wrote. These three archives are
-# linked into a SHARED library, and a non-PIC object in one of them is a relocation error at that
-# link — after all three have built, in a message that names XenonUtils and not a CMake variable.
-grep -q '^CMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON' "$BUILD/CMakeCache.txt" \
-    || { echo "FAIL: CMAKE_POSITION_INDEPENDENT_CODE is not ON in $BUILD/CMakeCache.txt." >&2
-         echo "      The flag is passed above; if the cache does not record it, XenonRecomp's" >&2
-         echo "      CMake overrode it, and the arm64 link of libcw_runtime.so will fail on" >&2
-         echo "      relocations naming these archives." >&2
-         exit 1; }
+# PIC. These three archives are linked into a SHARED library, and a non-PIC object in one of them is
+# a relocation error at that link — after all three have built, in a message that names XenonUtils
+# and not a CMake variable. So the property is worth checking; the first version of the check just
+# checked it in a way that could not be true.
+#
+# It grepped for `CMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON`, and failed on a build that was correct.
+# CMake records a -D variable that the PROJECT does not declare as a cache entry under the type
+# UNINITIALIZED, not BOOL, so the line in the cache was
+# `CMAKE_POSITION_INDEPENDENT_CODE:UNINITIALIZED=ON` and the grep for BOOL could never match.
+# SDL_STATIC_PIC really is `:BOOL=` — SDL declares it with option() — which is why the equivalent
+# check in build_sdl2_android.sh passes and this one did not. tools/android/build_dxc.sh greps
+# ANDROID_STL with `:.*` for exactly this reason.
+#
+# So: the type is not assumed, and the property is ALSO asked of the compiler that will build these
+# archives, because on Android it is the toolchain that decides position independence and not our
+# flag. __PIC__ is defined exactly when the compiler generates PIC by default. A check that states
+# which of the two it found is one that can be read; one that only asserts is one that has to be
+# believed, and this one was believed three times before it was run.
+PICLINE=$(grep -m1 '^CMAKE_POSITION_INDEPENDENT_CODE:' "$BUILD/CMakeCache.txt" || true)
+MACROS=$("$CW_CLANG" -dM -E -x c /dev/null 2>/dev/null || true)
+if grep -q ':.*=ON$' <<<"$PICLINE"; then
+    echo "    PIC: $PICLINE (from CMakeCache.txt)"
+elif grep -q '^#define __PIC__' <<<"$MACROS"; then
+    echo "    PIC: the toolchain's own default — __PIC__ is defined by $CW_CLANG"
+    echo "         (CMakeCache.txt says: ${PICLINE:-nothing; the variable is not in the cache})"
+else
+    echo "FAIL: these archives would not be position-independent, and they are linked into" >&2
+    echo "      libcw_runtime.so, which is a shared library." >&2
+    echo "      CMakeCache.txt says: ${PICLINE:-the variable is not in the cache at all}" >&2
+    echo "      $CW_CLANG does not define __PIC__, so PIC is not the toolchain default either." >&2
+    echo "      The flag is passed above; if the cache does not record it as ON, XenonRecomp's" >&2
+    echo "      CMake overrode it, and the arm64 link will fail on relocations naming these" >&2
+    echo "      archives rather than on anything that says PIC." >&2
+    exit 1
+fi
 
 echo "==> building XenonUtils, fmt, xxhash"
 # Named targets rather than the default all: `all` includes the recompiler executable and its
