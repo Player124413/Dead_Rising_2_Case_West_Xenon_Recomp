@@ -52,6 +52,8 @@ import org.libsdl.app.SDLActivity
  */
 class GameActivity : SDLActivity() {
 
+    // NOTE for whoever adds a use of this inside a View.apply { } block: qualify it. View.getOverlay()
+    // is the synthetic property `overlay`, and the View receiver wins over this field in that scope.
     private var overlay: TouchOverlayView? = null
     private var progressBox: LinearLayout? = null
     private var progressTitle: TextView? = null
@@ -240,7 +242,14 @@ class GameActivity : SDLActivity() {
             minimumWidth = 0
             minWidth = 0
             setOnClickListener {
-                val view = overlay ?: return@setOnClickListener
+                // this@GameActivity.overlay, and the qualification is load-bearing rather than
+                // decorative: android.view.View has getOverlay(), which Kotlin exposes as the
+                // synthetic property `overlay`, and inside Button.apply the Button is the receiver.
+                // Unqualified, `overlay` resolves to View.overlay — a ViewOverlay, never null, so the
+                // elvis does not even complain — and every member of the touch overlay below it
+                // becomes "Unresolved reference". The same name resolves correctly forty lines down
+                // in updateToolbar and onDestroy, where the receiver is not a View.
+                val view = this@GameActivity.overlay ?: return@setOnClickListener
                 view.editMode = !view.editMode
                 updateToolbar(view.editMode)
             }
@@ -253,7 +262,8 @@ class GameActivity : SDLActivity() {
             minWidth = 0
             visibility = View.GONE
             setOnClickListener {
-                val view = overlay ?: return@setOnClickListener
+                // Qualified for the reason given above: View.overlay shadows the field here.
+                val view = this@GameActivity.overlay ?: return@setOnClickListener
                 view.editMode = false
                 view.save(this@GameActivity)
                 updateToolbar(false)

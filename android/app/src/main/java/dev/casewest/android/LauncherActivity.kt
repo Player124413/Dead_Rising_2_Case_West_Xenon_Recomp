@@ -205,9 +205,11 @@ class LauncherActivity : Activity() {
         val cache = shaderCacheSummary()
         val dxc = if (config.dxcLib != null) config.dxcLib else "not imported"
         val base = buildString {
-            append("data root      ").append(GameFiles.root(this).absolutePath).append('\n')
+            // this@LauncherActivity, not this: inside buildString the receiver is a StringBuilder,
+            // so an unqualified `this` hands a StringBuilder to a function that wants a Context.
+            append("data root      ").append(GameFiles.root(this@LauncherActivity).absolutePath).append('\n')
             append("package        ")
-            append(GameFiles.findPackage(this)?.let { "${it.name} (${it.length() / (1024 * 1024)} MB)" }
+            append(GameFiles.findPackage(this@LauncherActivity)?.let { "${it.name} (${it.length() / (1024 * 1024)} MB)" }
                 ?: "none").append('\n')
             append("shader cache   ").append(cache).append('\n')
             append("dxc library    ").append(dxc).append('\n')
@@ -608,7 +610,12 @@ class LauncherActivity : Activity() {
         private val mimeTypes: Array<String>?,
         private val onPicked: (Uri?) -> Unit,
     ) {
-        private val requestCode = nextRequestCode++
+        // Not private, and that is not carelessness: Kotlin does not let the containing class read a
+        // private member of a nested one, so onActivityResult's
+        // `pickers.firstOrNull { it.requestCode == requestCode }` was rejected with "Cannot access
+        // 'val requestCode: Int': it is private in ...Picker". The class itself is private, so the
+        // widening stops at this file.
+        val requestCode = nextRequestCode++
 
         fun launch() {
             val intent = if (mimeTypes == null) {

@@ -32,6 +32,9 @@ import android.widget.Toast
  */
 class TouchSettingsActivity : Activity() {
 
+    // NOTE for whoever adds a use of this inside a View.apply { } block: qualify it. View has a
+    // method `layout(left, top, right, bottom)`, and in that scope the receiver's member wins over
+    // this field, so `layout.enabled` reads as a property of a function and does not resolve.
     private var layout: TouchOverlayView.Layout = TouchOverlayView.Layout()
     private val sizeLabels = HashMap<String, TextView>()
 
@@ -75,11 +78,13 @@ class TouchSettingsActivity : Activity() {
 
         val master = Switch(this).apply {
             text = "On-screen controls"
-            isChecked = layout.enabled
+            // this@TouchSettingsActivity.layout: inside the apply the Switch is the receiver and
+            // View.layout(l, t, r, b) shadows this Activity's field of the same name.
+            isChecked = this@TouchSettingsActivity.layout.enabled
             textSize = 16f
             setPadding(0, dp(14), 0, dp(6))
             setOnCheckedChangeListener { _, checked ->
-                layout.enabled = checked
+                this@TouchSettingsActivity.layout.enabled = checked
                 save()
                 // The native side's in-session switch follows immediately, so that turning
                 // touch off and returning to a paused game does not leave the overlay
@@ -111,8 +116,8 @@ class TouchSettingsActivity : Activity() {
             text = "Reset to the default layout"
             textSize = 13f
             setOnClickListener {
-                layout.reset()
-                layout.enabled = master.isChecked
+                this@TouchSettingsActivity.layout.reset()
+                this@TouchSettingsActivity.layout.enabled = master.isChecked
                 save()
                 recreateRows()
                 Toast.makeText(this@TouchSettingsActivity, "Layout reset", Toast.LENGTH_SHORT).show()
