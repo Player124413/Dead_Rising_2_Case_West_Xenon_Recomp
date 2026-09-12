@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
+# set -e FIRST, before the header comment rather than after it. This script declared it on line 48,
+# and line 6 of the header had lost its `#` — so bash ran a line of prose as a command, printed
+# "gpu/shader_translator.cpp: No such file or directory" into the build log of a job that then spent
+# an hour on an LLVM build, and carried on. With -e in force from line 2 the same mistake stops the
+# script at line 6, which is where it is.
+set -euo pipefail
+
 # Cross-compile DXC's libdxcompiler.so for Android, into a prefix whose jniLibs/ Gradle packages.
 #
 # WHY THIS SCRIPT EXISTS, AND WHY IT IS AN LLVM BUILD
 # ---------------------------------------------------
-gpu/shader_translator.cpp dlopens `libdxcompiler.so` and calls `DxcCreateInstance` through it. It is
+# gpu/shader_translator.cpp dlopens `libdxcompiler.so` and calls `DxcCreateInstance` through it. It
 # the only compiler in the pipeline: the guest's shader microcode becomes HLSL through XenosRecomp's
 # recompiler (compiled into the runtime) and HLSL becomes SPIR-V through DXC (loaded at run time).
 # No DXC, no SPIR-V, no draws — the runtime refuses each translation with one log line and presents
@@ -45,8 +52,6 @@ gpu/shader_translator.cpp dlopens `libdxcompiler.so` and calls `DxcCreateInstanc
 #
 # Usage:  tools/android/build_dxc.sh [prefix]
 #           default third_party/android/<abi>/dxc
-set -euo pipefail
-
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 # shellcheck source=_ndk.sh
@@ -99,10 +104,60 @@ done
 BUILD=$WORK/build-$ABI
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 
+# ---------------------------------------------------------------------------------------------
+# THE HOST HALF OF A CROSS BUILD HAS TO BE CONFIGURED BY HAND, because DXC configures it with three
+# flags and none of them is the one its own sources need.
+#
+# cmake/modules/CrossCompile.cmake ends, at file scope, with
+#
+#     llvm_create_cross_target_internal(NATIVE "" Release)
+#
+# which runs, for the tree that will hold the HOST llvm-tblgen and clang-tblgen this cross build
+# executes:
+#
+#     cmake -DCMAKE_BUILD_TYPE=Release -G "$GENERATOR" -DLLVM_TARGETS_TO_BUILD=None "$SRC"
+#
+# No -C PredefinedParams.cmake, and so no LLVM_ENABLE_EH. LLVM defaults it to OFF, the NATIVE build
+# compiles with -fno-exceptions, and DXC's own lib/Support/ErrorHandling.cpp:144 does
+# `throw hlsl::Exception(...)`. That is a hard error at [20/134] of a build that is not even the one
+# being asked for:
+#
+#     ErrorHandling.cpp:144:3: error: cannot use 'throw' with exceptions disabled
+#
+# The same function guards its own configure with `if(NOT IS_DIRECTORY ${LLVM_NATIVE_BUILD})`, so a
+# NATIVE tree that already exists is adopted as it stands. Configuring it here is therefore the
+# branch DXC's own code offers, not a way around it — and it terminates, because CrossCompile.cmake
+# is included only under LLVM_USE_HOST_TOOLS, which the nested configure does not set: it is not
+# cross-compiling, it IS the host.
+#
+# The compiler is left for CMake to choose, deliberately. Whichever clang++ is first on PATH in this
+# job is the NDK's, invoked bare, which defaults to the host triple rather than the Android one —
+# and the previous run proved it compiles these sources for the host, nineteen files deep, before
+# reaching the one that needed exceptions. Naming a compiler here would replace an observed working
+# choice with an assumed one.
+# ---------------------------------------------------------------------------------------------
+mkdir -p "$BUILD/NATIVE"
+echo "==> configuring the HOST tools DXC's cross build runs (NATIVE/, exceptions and RTTI on)"
+cmake -S "$SRC" -B "$BUILD/NATIVE" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_TARGETS_TO_BUILD=None \
+    -DLLVM_ENABLE_EH=ON \
+    -DLLVM_ENABLE_RTTI=ON \
+    >"$BUILD/native-configure.log" 2>&1 \
+    || { echo "FAIL: the NATIVE (host tools) configure did not complete." >&2
+         tail -60 "$BUILD/native-configure.log"; exit 1; }
+grep -q ':.*=ON$' <<<"$(grep -m1 '^LLVM_ENABLE_EH:' "$BUILD/NATIVE/CMakeCache.txt" || true)" \
+    && echo "    LLVM_ENABLE_EH is ON in NATIVE/CMakeCache.txt" \
+    || { echo "FAIL: NATIVE/CMakeCache.txt does not record LLVM_ENABLE_EH=ON, so DXC's" >&2
+         echo "      ErrorHandling.cpp will be compiled with -fno-exceptions again." >&2
+         echo "      It says: $(grep -m1 '^LLVM_ENABLE_EH:' "$BUILD/NATIVE/CMakeCache.txt" || echo 'nothing')" >&2
+         exit 1; }
+
 # cmake/caches/PredefinedParams.cmake is DXC's own set of required options, and it is passed with
 # -C the way DXC's docs say to: it runs before the root CMakeLists, and the -D flags below override
 # it (the cache script cannot override an explicit command-line parameter). What it gives us that
 # matters here is LLVM_TARGETS_TO_BUILD=None, LLVM_ENABLE_EH/RTTI=ON and ENABLE_SPIRV_CODEGEN=ON.
+# It reaches THIS configure only — hence the NATIVE one above.
 EXTRA_TABLEGEN=()
 if [ -n "${CW_DXC_HOST_TABLEGEN:-}" ]; then
     # An escape hatch for a machine that already has a matching host llvm-tblgen: LLVM's cross
