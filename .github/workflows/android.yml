@@ -440,9 +440,22 @@ jobs:
             third_party/android/${{ inputs.abi }}/ffmpeg
             third_party/android/${{ inputs.abi }}/adrenotools
             third_party/android/sdl-java
-            ../XenonRecomp/build-android-${{ inputs.abi }}
-          key: cw-android-deps-${{ inputs.abi }}-${{ hashFiles('tools/android/build_sdl2_android.sh', 'tools/android/build_ffmpeg_android.sh', 'tools/android/build_adrenotools.sh', 'tools/android/build_xenon_android.sh', 'tools/android/_ndk.sh', 'tools/ci/xenonrecomp-local.patch', 'android/gradle.properties') }}
+          # Keyed on the scripts that build what this cache holds, plus _ndk.sh, which every one of
+          # them sources, plus gradle.properties, which pins the NDK they build against.
+          # build_xenon_android.sh and xenonrecomp-local.patch are NOT in the list: they produce the
+          # tree that was just removed from the paths above, and hashing them here would keep
+          # discarding a good SDL2 and ffmpeg archive every time either changed.
+          key: cw-android-deps-${{ inputs.abi }}-${{ hashFiles('tools/android/build_sdl2_android.sh', 'tools/android/build_ffmpeg_android.sh', 'tools/android/build_adrenotools.sh', 'tools/android/_ndk.sh', 'android/gradle.properties') }}
           restore-keys: cw-android-deps-${{ inputs.abi }}-
+
+      # The XenonRecomp arm64 build tree is deliberately NOT in this list, though it was in the one
+      # this replaced. It lives at ../XenonRecomp/build-android-<abi> — outside GITHUB_WORKSPACE — and
+      # the evidence that actions/cache will not store it is that this cache has never been saved
+      # while the DXC one beside it has: same job, same restore/save split, same continue-on-error,
+      # and a path inside the workspace, and it saved 106 MB in the run where this one saved nothing
+      # in zero seconds and reported success anyway. continue-on-error is what made that invisible — a
+      # save that cannot fail is a save nobody checks. What the omission costs is about a minute:
+      # three static libraries, which build_apk.sh rebuilds when XenonUtils/libXenonUtils.a is absent.
 
       # DXC apart from the rest: it is an LLVM build and by far the longest step in this job, so the
       # one thing worth never rebuilding is the one thing a shared key would throw away most often.
@@ -502,7 +515,6 @@ jobs:
             third_party/android/${{ inputs.abi }}/ffmpeg
             third_party/android/${{ inputs.abi }}/adrenotools
             third_party/android/sdl-java
-            ../XenonRecomp/build-android-${{ inputs.abi }}
           key: ${{ steps.deps-cache.outputs.cache-primary-key }}
 
       - name: save DXC, including after a failure
