@@ -58,3 +58,25 @@ build-relid/
 /runtime/build-relmatch-oldbase/
 /runtime/*.configure.log
 /thirdparty/oldbase/
+
+# ---------------------------------------------------------------------------------------
+# The Android port (docs/android-port-plan.md).
+#
+# Everything here is regenerable from source by tools/android/build_apk.sh, and three of the
+# four are large: the cross-compiled dependencies are ~250 MB of static libraries, the Gradle
+# intermediates hold a copy of every native library per ABI, and the stub guest image is the
+# same shape as /ppc/ above.
+# ---------------------------------------------------------------------------------------
+/third_party/android/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/.cxx/
+/android/local.properties
+# The wrapper jar is regenerable from android/gradle/wrapper/gradle-wrapper.properties; the
+# properties file and the scripts are tracked, the binary is not.
+/android/gradle/wrapper/gradle-wrapper.jar
+# SDL's Java half, copied out of the SDL2 source tree by tools/android/build_sdl2_android.sh.
+# It MUST match the linked libSDL2.a (SDLActivity.onCreate version-checks it), so it is a build
+# output of a pinned version rather than a file to edit.
+/third_party/android/sdl-java/

@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The manifest, and the three declarations in it that are decisions rather than boilerplate.
+
+  1. NO android:extractNativeLibs. Gradle owns it: packaging.jniLibs.useLegacyPackaging =
+     true in app/build.gradle.kts makes the merger write extractNativeLibs="true", and a
+     value written here as well is a second answer to one question. It has to be true
+     because libadrenotools dlopens its hook libraries out of nativeLibraryDir, which only
+     holds real files when the libraries were extracted at install.
+
+  2. NO INTERNET permission. This build has no network: libxlive is not linked
+     (-DCW_XLIVE=OFF), so there is no account, no session, no leaderboard and nothing to
+     phone home to. Declaring a permission the code cannot use is how an app ends up
+     explaining itself to a player who read the install sheet.
+
+  3. Vulkan declared at 1.1 and REQUIRED, not at 1.3. The renderer refuses a device that
+     reports less than Vulkan 1.3 (gpu/vk_renderer.cpp checks props.apiVersion and says so
+     in words), but the version the PLATFORM reports is not the version the driver in use
+     reports: a phone whose system loader is 1.1 can still run this port on a Mesa Turnip
+     driver that reports 1.3, which is exactly the combination the launcher's driver row
+     exists for. Declaring 1.3 required would hide the app from those devices in store
+     filtering, and the honest gate is the one the launcher runs and explains.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The title's rumble reaches the phone's vibrator: host/android_bridge.cpp's one
+         native->Java callback, GameActivity.onNativeRumble. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:version="0x401000"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.vulkan.compute"
+        android:version="0"
+        android:required="true" />
+    <!-- A touchscreen is how the overlay is driven, but a Bluetooth pad is a complete way
+         to play: cpu/touch_input.h's whole design is that touch is the FOURTH input source
+         beside the pad and the keyboard, and CW_NO_TOUCH=1 turns it off entirely. -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:appCategory="game"
+        android:hardwareAccelerated="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="false"
+        android:theme="@style/Theme.CaseWest">
+
+        <!-- The launcher. It is a separate Activity from the game and not a screen inside
+             it, for a reason that is structural: SDLActivity's main thread does not return
+             from nativeRunMain until the runtime exits, so any UI that has to be usable
+             BEFORE a boot (pick a file, pick a driver, change a setting) cannot live in the
+             Activity that boots. This one owns the file import, the driver choice, the
+             settings and the diagnostics; the other one owns the surface. -->
+        <activity
+            android:name=".LauncherActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.CaseWest">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The game. landscape and sensorLandscape: the title renders 16:9 and its whole
+             HUD is laid out for it, and a portrait phone running a letterboxed 16:9 buffer
+             is a smaller picture for no reason. configChanges is SDL's own list — an
+             orientation or keyboard change that recreates the Activity would tear down the
+             surface under a renderer that built its swapchain against it. -->
+        <activity
+            android:name=".GameActivity"
+            android:configChanges="layoutDirection|locale|orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.CaseWest.Game" />
+
+        <!-- Touch layout and visibility editing, reachable from the launcher and from the
+             overlay's own edit mode. -->
+        <activity
+            android:name=".TouchSettingsActivity"
+            android:exported="false"
+            android:label="@string/touch_settings_title"
+            android:theme="@style/Theme.CaseWest" />
+
+        <!--
+          The Vulkan probe, in ITS OWN PROCESS, and the process is the entire reason it is a
+          service rather than a call from the launcher: gpu/vk_shadow_android.cpp picks its
+          loader once behind a std::once_flag, and a library loaded into a process stays loaded
+          there. A launcher that probed in the app's own process would decide the driver for the
+          game that follows it, and the player who picked Turnip after reading the diagnostics
+          would silently get the system driver instead. See ProbeService.kt.
+        -->
+        <service
+            android:name=".ProbeService"
+            android:exported="false"
+            android:process=":probe" />
+    </application>
+
+</manifest>

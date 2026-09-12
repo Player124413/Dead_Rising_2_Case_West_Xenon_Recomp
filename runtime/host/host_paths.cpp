@@ -29,6 +29,9 @@
 #else
 #include <unistd.h>
 #endif
+#if defined(__ANDROID__)
+#include <dlfcn.h>   // dladdr — QueryExePath's Android spelling, see below
+#endif
 
 namespace
 {
@@ -40,7 +43,24 @@ constexpr int kMaxWalk = 4;
 
 std::filesystem::path QueryExePath()
 {
-#if defined(_WIN32)
+#if defined(__ANDROID__)
+    // ANDROID HAS NO EXECUTABLE THAT IS OURS. /proc/self/exe resolves to
+    // /system/bin/app_process64 — the framework's zygote-spawned launcher, in a
+    // directory this app cannot write to and which holds nothing of ours. Walking up
+    // from it looking for `assets/` would find /system/bin, then /system, then /, and
+    // the root would be a guess about a read-only tree: the exact misroute this file
+    // exists to prevent, arriving through the one platform query that cannot answer.
+    //
+    // What we DO have is our own shared library, and dladdr names the file a function
+    // was loaded from. Its directory is the app's nativeLibraryDir — inside the app's
+    // sandbox, stable for the install's lifetime, and the directory every "beside the
+    // executable" asset was shipped beside. The data root itself is CW_ROOT (set by the
+    // launcher before the runtime starts); this answers only "where am I installed".
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&QueryExePath), &info) != 0 && info.dli_fname)
+        return std::filesystem::path(info.dli_fname);
+    return {};
+#elif defined(_WIN32)
     // GetModuleFileNameW rather than the A variant: a player's install path may hold
     // characters that do not survive the ANSI code page, and "it works on my machine"
     // is exactly what that defect looks like.
@@ -150,7 +170,22 @@ std::filesystem::path ResolveRoot()
         at = up;
     }
 
+#if defined(__ANDROID__)
+    // The walk above cannot succeed on Android and the fallback is a read-only directory,
+    // so this is not a "root we guessed" — it is a launcher that did not tell us where the
+    // data is. Say that in words a bug report can be written from, and name the variable,
+    // because the alternative is a first-run gate reporting a missing package in a tree
+    // that was never writable (gotcha 5: fail loudly with the identifier).
+    g_rootSource = "android-no-CW_ROOT";
+    std::fprintf(stderr,
+                 "[paths] CW_ROOT IS NOT SET. On Android the launcher must export it "
+                 "(the app's private <filesDir>/cw) before starting the runtime: there is "
+                 "no executable directory to walk up from, and %s is read-only. Nothing "
+                 "below will find the game, the shader cache or the saves.\n",
+                 exeDir.string().c_str());
+#else
     g_rootSource = "exe-dir";
+#endif
     return exeDir;
 }
 } // namespace
@@ -227,6 +262,23 @@ std::filesystem::path SavedGames()
     const char* home = std::getenv("HOME");
     return std::filesystem::path(home ? home : ".") / "Library" /
            "Application Support" / kGameFolder;
+#elif defined(__ANDROID__)
+    // ANDROID: inside the app's own data root, beside the unpacked game.
+    //
+    // The doctrine in the header still holds and still decides the shape — player data
+    // must live where no tool that touches the install tree can reach it. On a phone the
+    // two candidates are app-private storage (survives a game-folder rewrite, is removed
+    // with the app, needs no permission, and is where the framework expects a game's
+    // files) and shared storage (survives an uninstall, and costs a scoped-storage
+    // permission prompt for a directory the player was never going to browse). Private
+    // wins because the thing this port must never lose is a save under a re-import, and
+    // CW_ROOT — which the launcher sets to <filesDir>/cw — is already private.
+    //
+    // The human folder name is deliberately NOT used here: on a phone the path is never
+    // read by a person, and a directory called "Dead Rising 2 Case West" inside
+    // /data/data/<pkg>/files/cw would be a name answering a question nobody asked while
+    // making every adb pull longer.
+    return Root() / "save";
 #else
     if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg)
         return std::filesystem::path(xdg) / kGameFolder;

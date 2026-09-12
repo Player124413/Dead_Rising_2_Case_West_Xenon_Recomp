@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A vector rather than a PNG, and the reason is not size: this repository ships no game art,
+  and an app icon made from a screenshot of the title would be somebody else's asset in a
+  project that is careful about exactly that. What is here is ours — a dark field, the
+  runtime's own accent, and the CW monogram the desktop window's title bar uses.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#101014"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#7fb2ff"
+        android:pathData="M18,54a36,36 0 1,1 72,0a36,36 0 1,1 -72,0z"
+        android:strokeColor="#7fb2ff"
+        android:strokeWidth="3" />
+    <path
+        android:fillColor="#101014"
+        android:pathData="M30,42h20v6h-14v6h12v6h-12v8h-6z" />
+    <path
+        android:fillColor="#101014"
+        android:pathData="M56,42h20v6h-7v18h7v6h-20v-6h7v-18h-7z" />
+</vector>

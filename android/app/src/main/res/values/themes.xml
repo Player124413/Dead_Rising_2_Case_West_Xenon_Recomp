@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The framework's dark Material theme and nothing else, because this app has no
+      dependencies: no AppCompat, no Material Components, no Compose. Every widget in the
+      launcher is a framework widget, and a theme from a library this build does not have
+      would be an inflate-time crash rather than a style problem.
+    -->
+    <style name="Theme.CaseWest" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorAccent">#ff7fb2ff</item>
+        <item name="android:textColorPrimary">#fff2f2f5</item>
+        <item name="android:textColorSecondary">#ffb9b9c2</item>
+    </style>
+
+    <!--
+      The game's theme is the launcher's plus a window that draws nothing of its own: the
+      surface is the whole screen, and a title bar or a background behind it is a frame of
+      something that is not the game.
+    -->
+    <style name="Theme.CaseWest.Game" parent="Theme.CaseWest">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+    <!--
+      The launcher's row styles. Named for what a row IS rather than for how it looks, because
+      the point of having them is that "a section heading" is one thing in one place: the
+      launcher is a form, and a form whose spacing is set per-widget is a form that drifts the
+      first time somebody adds a row.
+    -->
+    <style name="CwSection">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">24dp</item>
+        <item name="android:paddingBottom">4dp</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.12</item>
+        <item name="android:textColor">#ff7fb2ff</item>
+    </style>
+
+    <style name="CwRowLabel">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">12dp</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
+    <style name="CwSpinner">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">2dp</item>
+    </style>
+
+    <style name="CwSwitch">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">10dp</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
+    <style name="CwButton">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginEnd">8dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="CwStatus">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">6dp</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">#fff2f2f5</item>
+    </style>
+
+    <style name="CwHelp">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">6dp</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+        <item name="android:textColor">?android:attr/textColorSecondary</item>
+    </style>
+</resources>

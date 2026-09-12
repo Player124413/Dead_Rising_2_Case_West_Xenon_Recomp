@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The drop target's outline. Dashed because it is a place to put something rather than a
+  control to press, and the state list matters: a drag in progress has to look different from
+  a drag that has not started, because the one thing a drop zone cannot do is leave the player
+  guessing whether the gesture was recognised.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_activated="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#337fb2ff" />
+            <stroke android:width="2dp" android:color="#7fb2ff" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#14ffffff" />
+            <stroke
+                android:width="2dp"
+                android:color="#55ffffff"
+                android:dashWidth="8dp"
+                android:dashGap="6dp" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+</selector>

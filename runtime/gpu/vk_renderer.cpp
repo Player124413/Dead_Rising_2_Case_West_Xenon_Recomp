@@ -13,6 +13,15 @@
 #include "../cpu/thread_budget.h"
 
 #include <vulkan/vulkan.h>
+// ANDROID ONLY, and it has to be the line after vulkan.h: this header #defines every
+// Vulkan entry point this file calls to a slot in a table filled from the loader
+// libadrenotools handed back, which is how a custom Turnip driver gets loaded without root
+// and without changing a single call site here. On every other platform it is one #if that
+// compiles to nothing and the file links Vulkan::Vulkan exactly as before. Read
+// tools/gen_vk_shadow.py's docstring for why Android cannot simply link libvulkan, and why
+// the include order is load-bearing (the same reason cpu/timebase.h includes
+// <x86intrin.h> before shadowing __rdtsc).
+#include "vk_shadow_android.h"
 
 #include <algorithm>
 #include <array>
@@ -7722,7 +7731,29 @@ void PrewarmPipelines()
     std::vector<PipelineKey> keys;
     const bool haveUser = readKeys(path, keys);
     const size_t userN = keys.size();
-    const std::string shipped = (HostPaths::ExeDir() / "prewarm.keys").string();
+    std::string shipped = (HostPaths::ExeDir() / "prewarm.keys").string();
+#if defined(__ANDROID__)
+    // ANDROID HAS NO EXECUTABLE DIRECTORY THAT CAN HOLD THIS. ExeDir() is the app's
+    // nativeLibraryDir, which holds .so files and nothing else — an APK cannot ship a key
+    // list there, and Gradle's jniLibs packaging would not carry one if it could. The
+    // launcher seeds the copy it does ship into the data root under tools/release/, beside
+    // vs_recipes.bin and kbm_chips, which already resolve through Root() for exactly this
+    // reason (host_paths.cpp's VsRecipes, overlay_gen.cpp's FindChipsDir).
+    //
+    // Scoped to Android rather than made the general second candidate, and the reason is a
+    // measurement: a DESKTOP DEV TREE also has no prewarm.keys beside its executable, so a
+    // general fallback would quietly hand every dev run the checked-in seed and change what
+    // it does at boot — 1,365 speculative pipeline builds, which is the whole reason this
+    // loop became async in part 102. On Android there is no such thing as a dev-tree run to
+    // protect: the seed is either here or the first session is not smooth.
+    {
+        FILE* probe = fopen(shipped.c_str(), "rb");
+        if (probe)
+            fclose(probe);
+        else
+            shipped = (HostPaths::Root() / "tools" / "release" / "prewarm.keys").string();
+    }
+#endif
     const bool haveShipped = readKeys(shipped, keys);
     if (!haveUser && !haveShipped)
     {

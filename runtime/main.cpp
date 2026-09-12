@@ -33,8 +33,20 @@
 #if defined(_WIN32)
 #include <windows.h>
 #elif !defined(__APPLE__)
+// <gnu/libc-version.h> IS A GLIBC HEADER, not a POSIX one, and Android's Bionic does
+// not ship it. Including it unconditionally on "not Windows, not Apple" was correct for
+// the two POSIX targets this runtime had; the Android port (docs/android-port-plan.md)
+// is the third, and its failure is a missing-header error in the ONE file every build
+// compiles first — which reads like a broken checkout rather than a platform difference.
+// __GLIBC__ is defined by glibc's own features.h, so this tests for the thing it wants
+// instead of for the platforms that happen to have it.
+#if defined(__GLIBC__)
 #include <gnu/libc-version.h>
+#endif
 #include <sys/utsname.h>
+#if defined(__ANDROID__)
+#include <android/api-level.h>
+#endif
 #endif
 
 #include <image.h> // XenonUtils: Image::ParseImage (devkit-key + LZX; see gotchas 15/16)
@@ -49,6 +61,7 @@
 #include "gpu/shader_translator.h"
 #include "gpu/vk_renderer.h"
 #include "host/first_run.h"
+#include "host/cw_main.h"
 #include "host/host_paths.h"
 #include "host/log_file.h"
 #include "host/overlay_gen.h"
@@ -70,6 +83,25 @@
 void FileImportsWriteSelfTest();
 
 namespace {
+
+// The libc's own version string, for the diagnostic banner. One spelling per libc,
+// because a banner that prints "glibc (null)" on a phone is a lie about the platform
+// this run is on — and the whole point of that line is that it identifies the platform.
+const char* LibcVersionString()
+{
+#if defined(__GLIBC__)
+    return gnu_get_libc_version();
+#elif defined(__ANDROID__)
+    // Bionic has no version string; the API level is the number that actually decides
+    // anything on Android (memfd_create is API 30, the ARM generic timer's frequency is
+    // a device property, and every "does this device work" report needs it).
+    static char buf[48];
+    snprintf(buf, sizeof buf, "bionic (Android API %d)", android_get_device_api_level());
+    return buf;
+#else
+    return "unknown";
+#endif
+}
 
 std::vector<uint8_t> LoadFile(const char* path)
 {
@@ -214,8 +246,8 @@ bool RunDiag()
     {
         struct utsname u{};
         uname(&u);
-        fprintf(stderr, "%s os: %s %s %s; glibc %s\n", T, u.sysname, u.release, u.machine,
-                gnu_get_libc_version());
+        fprintf(stderr, "%s os: %s %s %s; libc %s\n", T, u.sysname, u.release, u.machine,
+                LibcVersionString());
         std::ifstream osr("/etc/os-release");
         std::string line;
         while (osr && std::getline(osr, line))
@@ -275,7 +307,18 @@ bool RunDiag()
 
 } // namespace
 
-int main(int argc, char** argv)
+// THE ENTRY POINT IS A NAMED FUNCTION, NOT `main` (docs/android-port-plan.md §2).
+//
+// On Windows and Linux this program IS the process: the OS starts it at `main` and the
+// window loop owns the process until it exits. On Android there is no process to own —
+// the app's process is started by the framework, an Activity's Java code is already on
+// the main thread, and the runtime is a SHARED LIBRARY that library's JNI entry calls
+// into (host/android_bridge.cpp). So the body lives in CwRuntimeMain and each platform
+// supplies the one-line wrapper its own loader expects. Keeping the body in a function
+// rather than #ifdef-ing the signature means the two entry paths cannot drift: whatever
+// a desktop run does at boot, a phone run does too, in the same order, from the same
+// code. host/cw_main.h declares it so the bridge does not re-declare it by hand.
+int CwRuntimeMain(int argc, char** argv)
 {
     if (argc > 1 && strcmp(argv[1], "--smoke") == 0)
         return RunSmoke();
@@ -766,3 +809,13 @@ int main(int argc, char** argv)
     LogFile::End();
     return 0;
 }
+
+#ifndef __ANDROID__
+// The desktop wrapper: everything above is platform-neutral, and this is the only line
+// that differs between "the OS started this process" and "an Activity called into this
+// library". Android's equivalent is the JNI entry in host/android_bridge.cpp.
+int main(int argc, char** argv)
+{
+    return CwRuntimeMain(argc, argv);
+}
+#endif

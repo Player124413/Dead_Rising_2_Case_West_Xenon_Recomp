@@ -195,6 +195,35 @@ int Host_DisplayModeList(uint32_t*, int) { return 0; }
 #include "stfs_extract.h"
 #include <filesystem>
 
+#if defined(__ANDROID__)
+// The three Android seams this module owns, each documented where it lives:
+//   android_bridge.h  the ONE native->Java call (the title's rumble, to the vibrator)
+//   android_perf.h    the governor, whose Init needs the settings loaded and whose frame
+//                     sample comes from this loop's once-a-second cadence
+//   touch_input.h     the fourth input source, merged into pad 0 beside the controller and
+//                     the keyboard in the same block that already merges those two
+#include "android_bridge.h"
+#include "android_perf.h"
+#include "../cpu/touch_input.h"
+#include "../gpu/vk_shadow_android.h"   // CwVk::LoaderSource, for the log line below
+
+// The name of THIS library, as packaged. SDL_Vulkan_LoadLibrary is pointed at it (see
+// Host_WindowInit) so that SDL and the renderer share one Vulkan loader, and the
+// launcher's GameActivity asks SDLActivity to dlopen and SDL_main the same file — three
+// places that must agree, so one name in one header rather than three literals. If the
+// CMake target in runtime/CMakeLists.txt is ever renamed, this is the string that has to
+// move with it, and the boot log prints both.
+//
+// It is the runtime's own name and not SDL's stock "libmain.so" because Android builds the
+// `cw_runtime` target as a SHARED library, not as an executable: there is no exec'ing a
+// program on Android, SDLActivity's nativeRunMain dlopens whatever getLibraries() names
+// last and calls SDL_main in it. The desktop target is still an executable of the same
+// name, so the two builds share every source file and differ only in what CMake makes of
+// them — which is also why the Kotlin side lists "cw_runtime" and this macro says the same
+// thing with the platform's lib prefix and suffix attached.
+#define CW_ANDROID_SELF_LIB "libcw_runtime.so"
+#endif
+
 namespace {
 
 // XInput's button bits. Written out rather than included from anywhere, because the
@@ -1030,6 +1059,41 @@ bool     g_rumbleOff = false, g_rumbleTrace = false;
 
 void IssueRumble(uint16_t l, uint16_t r, const char* why)
 {
+#if defined(__ANDROID__)
+    // ANDROID: the device behind this call is the phone's vibrator, and it is on the other
+    // side of JNI (host/android_bridge.h — the only native->Java call this runtime makes).
+    //
+    // The early return below is `if (!g_controller)`, which on a phone with no Bluetooth pad
+    // attached is EVERY request — so without this branch the title's rumble would be
+    // silently dropped on exactly the devices the port exists for, and the log would say
+    // nothing because the tracing below is also behind the controller check. A phone that
+    // never vibrates and a title that never asks are the two candidate explanations for the
+    // same bug report, and this is the branch that makes them distinguishable.
+    //
+    // A physical pad still wins when one is connected: SDL's Android build supports
+    // Bluetooth and USB controllers (SDLControllerManager + HIDDeviceManager in the Java
+    // layer), and a player who brought a pad wants the pad's motors, not their pocket.
+    // The Java side turns a pair into a one-shot VibrationEffect of just over the refresh
+    // cadence below, so a held level stays a held buzz and (0,0) cancels it.
+    if (!g_controller)
+    {
+        AndroidBridge::Rumble(l, r);
+        ++g_rumbleIssues;
+        if (!g_rumbleEverIssued)
+            fprintf(stderr,
+                    "[host] rumble: %s -> the phone's vibrator via JNI (%u, %u). No "
+                    "controller is attached. CW_NO_RUMBLE=1 turns this off, "
+                    "CW_RUMBLE_TRACE=1 traces every pair.\n", why, l, r);
+        g_rumbleEverIssued = true;
+        g_rumbleLastRc = 0;
+        g_rumbleLastL = l;
+        g_rumbleLastR = r;
+        g_rumbleLastIssue = std::chrono::steady_clock::now();
+        if (g_rumbleTrace && (l || r))
+            fprintf(stderr, "[rumble] %s L=%u R=%u -> vibrator\n", why, l, r);
+        return;
+    }
+#endif
     if (!g_controller)
         return;
     const int rc = SDL_GameControllerRumble(g_controller, l, r, 700);
@@ -1506,6 +1570,16 @@ void Shutdown(const char* why)
     // ends here rather than through main.
     ::GapProbe_Report();
     ::FeProbe_Report();
+#if defined(__ANDROID__)
+    // ANDROID'S TWO, for the same reason and with the same urgency: this is the path a phone
+    // session actually ends on — the player swipes the app away, or the guest returns and
+    // Host_RequestQuit brings the loop down — and SDL_main's own reports after
+    // CwRuntimeMain never run, because Shutdown ends the process with _Exit. A counter dump
+    // that only prints on the path nobody takes is a counter that was never printed, which
+    // is exactly what part 38 lost an evening to (gotcha 294).
+    ::TouchInput_ReportStats();
+    ::AndroidPerf::Report();
+#endif
     // PART 71: and write the pipeline cache back, HERE rather than inside DumpStats —
     // see the header comment on why. This is the normal quit path, so it is the one that
     // actually has to fire for the next launch to be warm.
@@ -1674,8 +1748,34 @@ void Host_DiagVideo()
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
+#if defined(__ANDROID__)
+// The first-run work (a 1.2 GB STFS extract, then 1,322 shaders, then the prompt-art
+// overlay) runs BEFORE Host_WindowInit, and on a phone it is the difference between
+// "installing" and "frozen": it is minutes long on a device whose desktop equivalent took
+// 7.5 s. The app has a real UI for it, so the progress goes there instead of into a second
+// SDL window — SDL's Android video driver has exactly one surface, the Activity's, and a
+// second SDL_CreateWindow either fails or fights the first for it.
+//
+// Returns TRUE without creating anything, deliberately: main.cpp gates Host_ProgressEnd on
+// this return value, and an End that never runs leaves the app's progress bar up over a
+// game that has already started. The flag below is what routes Update and End to JNI
+// instead of to a renderer that does not exist.
+bool g_progAndroid = false;
+#endif
+
 bool Host_ProgressBegin(const char* title)
 {
+#if defined(__ANDROID__)
+    if (AndroidBridge::ProgressBegin(title ? title : ""))
+    {
+        g_progAndroid = true;
+        g_progLastDraw = 0;
+        return true;
+    }
+    fprintf(stderr, "[host] progress: the app has no listener registered yet (the Activity "
+                    "is not up) — console lines only.\n");
+    return false;
+#endif
     if (getenv("CW_NO_WINDOW"))
         return false;
     if (g_progWindow)
@@ -1708,6 +1808,22 @@ bool Host_ProgressBegin(const char* title)
 
 void Host_ProgressUpdate(const char* line, float fraction)
 {
+#if defined(__ANDROID__)
+    if (g_progAndroid)
+    {
+        // Rate-limited here rather than in the bridge, for the same reason the SDL path
+        // rate-limits its own drawing: the extract reports per FILE and the shader build per
+        // SHADER, and each report would otherwise be a JNI call plus a View invalidation.
+        // 10 Hz is well past what a progress bar can show and well under what either caller
+        // produces.
+        const uint64_t nowMs = uint64_t(SDL_GetTicks());
+        if (nowMs - g_progLastDraw < 100)
+            return;
+        g_progLastDraw = nowMs;
+        AndroidBridge::ProgressUpdate(line ? line : "", fraction);
+        return;
+    }
+#endif
     if (!g_progRenderer)
         return;
     // Pump so the compositor never marks the window unresponsive; drop every event —
@@ -1757,6 +1873,14 @@ void Host_ProgressUpdate(const char* line, float fraction)
 
 void Host_ProgressEnd()
 {
+#if defined(__ANDROID__)
+    if (g_progAndroid)
+    {
+        g_progAndroid = false;
+        AndroidBridge::ProgressEnd();
+        return;
+    }
+#endif
     if (g_progRenderer)
         SDL_DestroyRenderer(g_progRenderer);
     if (g_progWindow)
@@ -1817,6 +1941,25 @@ void LauncherText(SDL_Renderer* r, int tx, int ty, const std::string& str, int s
 
 bool Host_RunLauncher()
 {
+#if defined(__ANDROID__)
+    // ON ANDROID THE LAUNCHER IS THE APP. android/app/src/main/java/dev/casewest/android/
+    // LauncherActivity.kt is this function's replacement, and it is not a thinner one: it
+    // does everything this modal loop does (settings rows, the install-by-drop path, PLAY)
+    // plus the things a phone needs and a desktop does not — importing a 1.2 GB package
+    // through the storage access framework, managing Turnip drivers, and the touch-overlay
+    // editor.
+    //
+    // The two cannot both run, and the reason is not duplication: SDL's Android video driver
+    // owns exactly one surface, the Activity's, and a second SDL_CreateWindow inside this
+    // loop would either fail or take the surface the game is about to need. Returning true
+    // is "continue the boot", which is what window.h promises this function returns when it
+    // declines — and it declines here on principle rather than on CW_NO_WINDOW, because a
+    // phone build that somehow arrived with CW_LAUNCHER=1 must still boot into the game
+    // instead of hanging in a modal loop nobody can see.
+    fprintf(stderr, "[launcher] Android: the app's own launcher owns the pre-boot UI — "
+                    "skipping the SDL launcher and continuing the boot.\n");
+    return true;
+#endif
     if (getenv("CW_NO_WINDOW"))
         return true;
     PreferWaylandWhenOffered();
@@ -2365,6 +2508,49 @@ bool Host_WindowInit()
         return false;
     }
 
+#if defined(__ANDROID__)
+    // WHICH LIBRARY SDL LOADS FOR VULKAN, and on Android it has to be ours.
+    //
+    // SDL_Vulkan_LoadLibrary(NULL) would have SDL dlopen the SYSTEM libvulkan.so and
+    // resolve its own entry points from it — i.e. the vendor driver, whatever the player
+    // picked in the launcher. gpu/vk_shadow_android.cpp has already opened the loader that
+    // libadrenotools hooked around a custom Turnip driver (or the plain system one, when no
+    // driver was imported), and every call the renderer makes goes through that table. Two
+    // loader instances means two driver tables, and the surface — the one thing SDL creates
+    // — would belong to the one that is NOT the driver the player chose. Pointing SDL at
+    // THIS library instead makes it dlsym the four exported forwarders at the bottom of
+    // vk_shadow_android.cpp, so SDL and the renderer reach the same loader by construction.
+    //
+    // "This library" is found the way host_paths.cpp finds it (dladdr on ourselves), with
+    // the bare soname as the fallback: the app's nativeLibraryDir is already in this
+    // process's linker namespace, so the soname resolves on its own, and a dladdr that
+    // fails must not cost the port its driver. A failure to load OURSELVES is not
+    // recoverable and is not treated as if it were — SDL would then be using a different
+    // loader, which is the exact thing this block exists to prevent.
+    {
+        const std::filesystem::path self = HostPaths::ExeDir() / CW_ANDROID_SELF_LIB;
+        std::error_code ec;
+        const std::string selfStr = self.string();
+        const char* libPath = std::filesystem::exists(self, ec) ? selfStr.c_str()
+                                                                : CW_ANDROID_SELF_LIB;
+        if (SDL_Vulkan_LoadLibrary(libPath) != 0)
+        {
+            fprintf(stderr,
+                    "[host] SDL_Vulkan_LoadLibrary(%s) FAILED: %s — RUNNING HEADLESS "
+                    "rather than letting SDL load the system loader, which would put the "
+                    "surface on a different Vulkan driver from the renderer's.\n",
+                    libPath, SDL_GetError());
+            SDL_Quit();
+            return false;
+        }
+        fprintf(stderr,
+                "[host] SDL's Vulkan library: %s (the same loader the renderer uses: %s). "
+                "SDL resolves vkGetInstanceProcAddr/vkCreateInstance from it by name, which "
+                "is why gpu/vk_shadow_android.cpp exports those four symbols.\n",
+                libPath, CwVk::LoaderSource());
+    }
+#endif
+
     // CW_VK_SWAPCHAIN=1 — the renderer presents its own image through a Vulkan
     // swapchain on this window instead of reading it back and handing us pixels.
     //
@@ -2410,12 +2596,22 @@ bool Host_WindowInit()
     // and one at 100%, so a logical size means two different pixel counts depending on
     // where the window lands.
     int startW = kDefaultWidth, startH = kDefaultHeight;
+#if defined(__ANDROID__)
+    // A phone's window is the Activity's surface: SDL's Android video driver sizes it from
+    // the surface and ignores both the creation size and the position, so the windowed
+    // arithmetic below (open at the persisted internal resolution, clamped to the display's
+    // usable bounds) has nothing to decide here and would only print a line about a size
+    // nobody honours.
+    constexpr bool kSizeIsOurs = false;
+#else
+    constexpr bool kSizeIsOurs = true;
+#endif
     // A WINDOWED window opens at the persisted internal resolution (part 108) — the
     // same rule the live apply follows — clamped to display 0's usable bounds with the
     // aspect kept, so a resolution larger than the desktop opens as the largest window
     // that fits rather than one whose title bar is off the screen. CW_WINDOW_SIZE and
     // CW_WINDOW_MAXIMIZED win below, exactly as they do over the display mode.
-    if (!getenv("CW_WINDOW_SIZE") && !getenv("CW_WINDOW_MAXIMIZED") &&
+    if (kSizeIsOurs && !getenv("CW_WINDOW_SIZE") && !getenv("CW_WINDOW_MAXIMIZED") &&
         Settings_DisplayMode() == CzDisplayMode::Windowed)
     {
         uint32_t rw = 0, rh = 0;
@@ -2456,6 +2652,7 @@ bool Host_WindowInit()
     // The persisted display mode (part 60's PC options screen). CW_WINDOW_SIZE and
     // CW_WINDOW_MAXIMIZED are measurement controls and win over it: a run pinning the
     // window for an A/B must not have the settings file silently un-pin it.
+#if !defined(__ANDROID__)
     Uint32 modeFlag = 0;
     if (!getenv("CW_WINDOW_SIZE") && !getenv("CW_WINDOW_MAXIMIZED"))
     {
@@ -2472,9 +2669,41 @@ bool Host_WindowInit()
     const Uint32 windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | modeFlag |
                                (g_wantVulkanSwapchain ? SDL_WINDOW_VULKAN : 0u) |
                                (getenv("CW_WINDOW_MAXIMIZED") ? SDL_WINDOW_MAXIMIZED : 0u);
+#endif
+// ONE variable, because the retry below has to use the same flags as the first attempt: a
+// fallback that silently switches to the desktop's flag set would create a window with no
+// ALLOW_HIGHDPI on a phone and the swapchain would come out at a fraction of the panel.
+#if defined(__ANDROID__)
+    // ANDROID'S FLAGS, and the two that are not on a desktop are not cosmetic.
+    //
+    //   FULLSCREEN       the surface is the whole window; there is no decoration to ask for
+    //                    and no windowed mode to fall back to.
+    //   ALLOW_HIGHDPI    without it, SDL reports the surface size in DIPs and the swapchain
+    //                    is created at a fraction of the panel's real pixels — a 2400x1080
+    //                    phone rendering into 800x360 and being upscaled by the compositor.
+    //                    This runtime wants physical pixels everywhere (see the Windows DPI
+    //                    comment above for the same rule on the other platform), and on a
+    //                    phone the difference is not sharpness alone: the internal-resolution
+    //                    ladder in host/android_perf.cpp is built from what the display
+    //                    reports, so a DIP-sized display would build a ladder for a screen
+    //                    that does not exist.
+    //
+    // RESIZABLE and MAXIMIZED are dropped because they mean nothing here, and modeFlag is
+    // dropped because the display mode is not ours to choose.
+    const Uint32 createFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN |
+                               SDL_WINDOW_ALLOW_HIGHDPI |
+                               (g_wantVulkanSwapchain ? SDL_WINDOW_VULKAN : 0u);
+#else
+    const Uint32 createFlags = windowFlags;
+#endif
+#if defined(__ANDROID__)
+    g_window = SDL_CreateWindow("Dead Rising 2: Case West", SDL_WINDOWPOS_UNDEFINED,
+                                SDL_WINDOWPOS_UNDEFINED, startW, startH, createFlags);
+#else
     g_window = SDL_CreateWindow("Dead Rising 2: Case West", SDL_WINDOWPOS_CENTERED,
                                 SDL_WINDOWPOS_CENTERED, startW, startH,
-                                windowFlags);
+                                createFlags);
+#endif
     if (!g_window && g_wantVulkanSwapchain)
     {
         // Losing the Vulkan flag must not silently cost the window, and it must not
@@ -2487,9 +2716,15 @@ bool Host_WindowInit()
                         "configuration: expect the frame times of part 53.\n",
                 SDL_GetError());
         g_wantVulkanSwapchain = false;
+#if defined(__ANDROID__)
+        g_window = SDL_CreateWindow("Dead Rising 2: Case West", SDL_WINDOWPOS_UNDEFINED,
+                                    SDL_WINDOWPOS_UNDEFINED, startW, startH,
+                                    createFlags & ~Uint32(SDL_WINDOW_VULKAN));
+#else
         g_window = SDL_CreateWindow("Dead Rising 2: Case West", SDL_WINDOWPOS_CENTERED,
                                     SDL_WINDOWPOS_CENTERED, startW, startH,
-                                    windowFlags & ~Uint32(SDL_WINDOW_VULKAN));
+                                    createFlags & ~Uint32(SDL_WINDOW_VULKAN));
+#endif
     }
     if (!g_window)
     {
@@ -2498,12 +2733,21 @@ bool Host_WindowInit()
         SDL_Quit();
         return false;
     }
+#if !defined(__ANDROID__)
+    // A window icon is a desktop affordance; on a phone the launcher's own icon is what the
+    // player sees, and generating it costs a read of the title's X_IMAGEID_GAME.PNG.
     ApplyGameIcon(g_window);
+#endif
 
     // The persisted EXCLUSIVE fullscreen upgrades the borderless creation flag here,
     // once the window exists to measure its display against (see the flags comment).
+    // Not on Android: there is no display mode to switch to (the surface is the panel) and
+    // SDL_SetWindowFullscreen on the Android driver is a no-op that would still print the
+    // mode line into the boot log of a phone that has no modes.
+#if !defined(__ANDROID__)
     if (modeFlag != 0 && Settings_DisplayMode() == CzDisplayMode::Fullscreen)
         ApplyDisplayModeNow(CzDisplayMode::Fullscreen);
+#endif
 
     // SDL2 starts TEXT INPUT by default on desktop, which routes held keys through
     // the OS input method — on the operator's Linux desktop, HOLDING a letter popped
@@ -2556,6 +2800,14 @@ bool Host_WindowInit()
 
     g_inputTrace = getenv("CW_INPUT_TRACE") != nullptr;
     g_active = true;
+
+#if defined(__ANDROID__)
+    // The governor starts here and not in SDL_main: its ladder is built from the player's
+    // PERSISTED internal resolution, which Settings_Load has only just read (main.cpp loads
+    // it before this function on purpose, because the display mode is a window-creation
+    // decision), and its first sample should be of gameplay rather than of a boot.
+    AndroidPerf::Init();
+#endif
 
     // ...and say so out loud, per renderer, because the hint above is a REQUEST. SDL
     // 2.0.18 added the explicit call, which is the one that can also FAIL and say so —
@@ -3081,6 +3333,26 @@ void Host_WindowRun()
         // neither can pin a stick the other is using); pad 1 reports idle-connected.
         {
             HostPadState merged = ReadController();
+#if defined(__ANDROID__)
+            // TOUCH — THE FOURTH SOURCE, merged FIRST, and the ordering is load-bearing.
+            //
+            // `merged` at this line holds the physical controller's state and nothing else,
+            // which is exactly what TouchInput_Merge's drift rule needs: it zeroes the
+            // sub-deadzone axes of what it is handed, and what it is handed must therefore
+            // be one device's contribution, not three merged together. Merging after the
+            // keyboard would either skip that rule or eat the keyboard's own values.
+            //
+            // Merging first also means every decision below sees touch input as pad input,
+            // which is what it is: the device-follow test flips the prompt art to the Xbox
+            // glyphs (correct — touch emulates a pad, so the pad's icons are the honest
+            // ones), and PublishPad's packet number moves on a touch press exactly as it
+            // does on a button press. cpu/touch_input.h has the rest of the contract, and
+            // the geometry that decides WHICH control a finger is on lives in the app
+            // (android/app/src/main/java/dev/casewest/android/TouchOverlayView.kt) for the
+            // reason given there.
+            bool touchActive = false;
+            TouchInput_Merge(merged, touchActive);
+#endif
             // Device-follow: deliberate pad input (a button, a trigger, or a
             // stick past the reference deadzone — their pad DRIFTS at 18%, so
             // idle must not count) flips the prompt art to the Xbox glyphs.
@@ -3102,7 +3374,20 @@ void Host_WindowRun()
             // the solo-pad path, where the game applies its own.
             const bool kbActive = kb.buttons || kb.leftTrigger || kb.rightTrigger ||
                                   kb.thumbLX || kb.thumbLY || kb.thumbRX || kb.thumbRY;
+#if defined(__ANDROID__)
+            // NOT WHEN TOUCH IS DRIVING. The rule above exists to stop a DRIFTING PAD
+            // fighting the keyboard, and TouchInput_Merge has already applied it to the
+            // controller's contribution. Applying it a second time here would zero the
+            // touch stick's own deflection instead: unlike the keyboard's full-scale
+            // ±32767, a thumb on a stick publishes PROPORTIONAL values, and a gentle walk
+            // lives entirely inside this window. The combination this costs anything —
+            // a Bluetooth keyboard AND touch controls on the same phone — keeps the pad's
+            // drift on the axes touch is not using, which is the cheaper of the two errors
+            // and the one a log line can explain.
+            if (kbActive && !touchActive)
+#else
             if (kbActive)
+#endif
             {
                 auto dz = [](int16_t& v) {
                     if (v > -7849 && v < 7849)
@@ -3257,6 +3542,17 @@ void Host_WindowRun()
             const double fps = double(presented - framesAtLastTitle) * 1000.0 / double(sinceTitle);
             framesAtLastTitle = presented;
             lastTitle = now;
+
+#if defined(__ANDROID__)
+            // THE PERFORMANCE GOVERNOR'S SAMPLE, taken from a cadence that already existed.
+            // This block runs once a second to update the title bar's frame rate; on a phone
+            // there is no title bar, but the number is still computed and it is still the
+            // frame rate the player is looking at, so host/android_perf.cpp takes it from
+            // here rather than adding a second clock. A governor with its own timer would be
+            // a second source of truth about the frame rate, and the two would disagree by
+            // exactly enough to make a scaling decision unexplainable.
+            AndroidPerf::NoteFps(fps);
+#endif
 
             bool rendering;
             {

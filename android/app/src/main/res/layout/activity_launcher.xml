@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher. Four numbered sections and a Play button, and the numbering is the order a
+  first launch actually has to happen in: the game file, then the driver the game will render
+  with, then how hard to push the device, then how to control it.
+
+  A ScrollView of framework widgets rather than a Compose screen or a fragment stack, for the
+  same reason the theme is a framework theme: this app has no dependencies, and the launcher is
+  one screen that has to be readable by somebody who has never seen it. Everything dynamic in
+  it — the driver list, the status lines — is filled in by LauncherActivity from the ids below.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="28dp">
+
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Dead Rising 2: Case West"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/subtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="12sp" />
+
+        <!-- ============================== 1. THE GAME ============================== -->
+        <TextView
+            style="@style/CwSection"
+            android:text="1  THE GAME" />
+
+        <TextView
+            android:id="@+id/gameStatus"
+            style="@style/CwStatus" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/importGame"
+                style="@style/CwButton"
+                android:text="Import game file…" />
+
+            <Button
+                android:id="@+id/importFolder"
+                style="@style/CwButton"
+                android:text="Import folder…" />
+        </LinearLayout>
+
+        <FrameLayout
+            android:id="@+id/dropZone"
+            android:layout_width="match_parent"
+            android:layout_height="96dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/drop_zone">
+
+            <TextView
+                android:id="@+id/dropHint"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:padding="10dp"
+                android:text="or drag the package here from a file manager"
+                android:textColor="?android:attr/textColorSecondary"
+                android:textSize="13sp" />
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/gameHelp"
+            style="@style/CwHelp"
+            android:text="The package is the file your Xbox 360 downloaded — about 1.2 GB, no
+extension, in Content/0000000000000000/58410B00/000D0000/. Selecting that file or the
+58410B00 folder above it both work. It is copied into this app's private storage, and
+uninstalling the app removes it. This build ships no game data and cannot supply any." />
+
+        <!-- ============================= 2. GPU DRIVER ============================= -->
+        <TextView
+            style="@style/CwSection"
+            android:text="2  GPU DRIVER" />
+
+        <TextView
+            android:id="@+id/driverStatus"
+            style="@style/CwStatus" />
+
+        <LinearLayout
+            android:id="@+id/driverList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="vertical" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/importDriver"
+                style="@style/CwButton"
+                android:text="Import driver (.adpkg)…" />
+
+            <Button
+                android:id="@+id/probeDriver"
+                style="@style/CwButton"
+                android:text="Test driver" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/driverHelp"
+            style="@style/CwHelp" />
+
+        <!-- ============================ 3. PERFORMANCE ============================ -->
+        <TextView
+            style="@style/CwSection"
+            android:text="3  PERFORMANCE" />
+
+        <TextView
+            style="@style/CwRowLabel"
+            android:text="Internal resolution" />
+
+        <Spinner
+            android:id="@+id/resSpinner"
+            style="@style/CwSpinner" />
+
+        <TextView
+            android:id="@+id/resHelp"
+            style="@style/CwHelp"
+            android:text="AUTO lets the governor move the resolution to hold the frame rate —
+that is what makes this playable on a mid-range phone. Picking a fixed resolution pins it and
+turns the governor off, which is what you want for a measurement and not for a play session." />
+
+        <TextView
+            style="@style/CwRowLabel"
+            android:text="MSAA" />
+
+        <Spinner
+            android:id="@+id/msaaSpinner"
+            style="@style/CwSpinner" />
+
+        <TextView
+            style="@style/CwRowLabel"
+            android:text="Frame-rate cap" />
+
+        <Spinner
+            android:id="@+id/fpsSpinner"
+            style="@style/CwSpinner" />
+
+        <Switch
+            android:id="@+id/autoScale"
+            style="@style/CwSwitch"
+            android:text="Auto-scale resolution to hold the frame rate" />
+
+        <Switch
+            android:id="@+id/thermal"
+            style="@style/CwSwitch"
+            android:text="Lower the ceiling when the phone gets hot" />
+
+        <Switch
+            android:id="@+id/pinBig"
+            style="@style/CwSwitch"
+            android:text="Pin the pump thread to the big cores" />
+
+        <!-- ============================== 4. TOUCH =============================== -->
+        <TextView
+            style="@style/CwSection"
+            android:text="4  TOUCH CONTROLS" />
+
+        <Switch
+            android:id="@+id/touchEnabled"
+            style="@style/CwSwitch"
+            android:text="On-screen controls" />
+
+        <Button
+            android:id="@+id/touchSettings"
+            style="@style/CwButton"
+            android:layout_marginTop="6dp"
+            android:text="Arrange controls, sizes and visibility…" />
+
+        <TextView
+            style="@style/CwHelp"
+            android:text="Touch is the fourth input source beside a Bluetooth pad, a keyboard and
+the guest's own reads: switching it off leaves the others working. A pad pairs normally and its
+state merges with the overlay's rather than fighting it." />
+
+        <!-- =============================== PLAY ================================= -->
+        <Button
+            android:id="@+id/play"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:minHeight="58dp"
+            android:text="Play"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/playStatus"
+            style="@style/CwStatus" />
+
+        <!-- ============================ DIAGNOSTICS ============================== -->
+        <TextView
+            style="@style/CwSection"
+            android:text="DIAGNOSTICS" />
+
+        <TextView
+            android:id="@+id/diagnostics"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:paddingTop="6dp"
+            android:textIsSelectable="true"
+            android:textSize="11sp"
+            android:textColor="?android:attr/textColorSecondary" />
+    </LinearLayout>
+</ScrollView>

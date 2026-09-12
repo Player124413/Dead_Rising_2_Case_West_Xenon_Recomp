@@ -12,6 +12,16 @@
 #   * `cw_runtime --smoke` passes against a STUB image (tools/gen_stub_ppc.py):
 #     every symbol the runtime references resolves, every mapping entry is sane.
 #
+# TWO THINGS ARE STUBBED HERE AND NEITHER IS A COMPROMISE ABOUT THE RELEASE:
+#
+#   * the guest image, because no runner may hold the game (above);
+#   * libxlive, via -DCW_XLIVE=OFF, because XenonLive is a PRIVATE sibling checkout and no
+#     runner can clone it. Without that option configure stops at XLIVE_ROOT before
+#     compiling anything, so this workflow was red at configure and proved nothing. OFF
+#     compiles kernel/xlive_stub.cpp instead — generated from the five xlive_*.h headers by
+#     tools/gen_xlive_stub.py, which is gated by --check below so a drifted signature is a
+#     red step naming the generator rather than an undefined symbol at link time.
+#
 # That catches the overwhelming majority of what a port breaks — includes,
 # platform ifdefs, link lines — and nothing else. The release artifacts are built
 # and gated on the dev machines (tools/release_package_linux.sh + the clean-
@@ -67,13 +77,23 @@ jobs:
       - name: generate the stub image
         run: python3 tools/gen_stub_ppc.py --out ../stub-ppc --xenon ../XenonRecomp
 
+      # Both generated stubs are CHECKED before they are used. A stale one is an undefined
+      # symbol at link time (xlive) or a missing function body (the guest image), i.e. a
+      # failure that names a symbol rather than the file that should have been regenerated.
+      - name: check the generated XLive stub is current
+        run: python3 tools/gen_xlive_stub.py --check
+
+      - name: check the generated Vulkan shadow header is current
+        run: python3 tools/gen_vk_shadow.py --check
+
       - name: configure and build the runtime
         run: |
           cmake -S runtime -B runtime/build -G Ninja \
             -DCW_PPC_DIR="$PWD/../stub-ppc" \
             -DXENON_ROOT="$PWD/../XenonRecomp" \
             -DXENON_BUILD="$PWD/../XenonRecomp/build" \
-            -DXENOS_ROOT="$PWD/../XenosRecomp"
+            -DXENOS_ROOT="$PWD/../XenosRecomp" \
+            -DCW_XLIVE=OFF
           cmake --build runtime/build -j"$(nproc)"
 
       - name: smoke against the stub image
@@ -139,6 +159,12 @@ jobs:
       - name: generate the stub image
         run: python tools/gen_stub_ppc.py --out ../stub-ppc --xenon ../XenonRecomp
 
+      - name: check the generated XLive stub is current
+        run: python tools/gen_xlive_stub.py --check
+
+      - name: check the generated Vulkan shadow header is current
+        run: python tools/gen_vk_shadow.py --check
+
       # Configure and build are separate steps and both tee into log files that the
       # always() artifact below publishes — this repo's sessions read CI through the
       # public API, which serves step VERDICTS but not step logs, and a red step
@@ -157,6 +183,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="$vcpkg" `
             -DCW_SDL2_PREFIX="$vcpkg" `
             -DCW_FFMPEG_PREFIX="$vcpkg" `
+            -DCW_XLIVE=OFF `
             -DCW_SPLIT_DEBUG=OFF -DCW_BUNDLE_RPATH=OFF 2>&1 | Tee-Object configure.log
           if ($LASTEXITCODE -ne 0) { exit 1 }
 

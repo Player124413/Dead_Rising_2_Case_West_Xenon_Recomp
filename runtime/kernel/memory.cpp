@@ -13,6 +13,35 @@
 #else
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__ANDROID__)
+#include <sys/syscall.h>
+#endif
+#endif
+
+#if !defined(_WIN32)
+namespace
+{
+// memfd_create behind one name, because the LIBC WRAPPER and the SYSCALL did not arrive
+// at the same time on the platforms this runtime now runs on. glibc has declared it
+// since 2.27; Bionic only from API 30 (Android 11). The syscall has existed since Linux
+// 3.17, so on an Android 9 phone the only thing missing is a declaration — and a build
+// that fails on "use of undeclared identifier 'memfd_create'" on ONE Android API level
+// is a build that cannot ship one APK for all of them.
+//
+// MFD_CLOEXEC is restated rather than included from <linux/memfd.h>: that header is not
+// in every NDK sysroot, and the value is ABI, not a detail — it is 0x0001U everywhere
+// and forever. A leaked fd here would be a file descriptor held open for the life of the
+// process pointing at 512 MB of guest RAM, which no amount of later close() fixes.
+int CwMemfdCreate(const char* name)
+{
+    constexpr unsigned int kMfdCloexec = 0x0001U;
+#if defined(__ANDROID__) && (!defined(__ANDROID_API__) || __ANDROID_API__ < 30)
+    return int(syscall(SYS_memfd_create, name, kMfdCloexec));
+#else
+    return memfd_create(name, kMfdCloexec);
+#endif
+}
+} // namespace
 #endif
 
 Memory g_memory;
@@ -169,7 +198,16 @@ void Memory::Init()
 
     // Back all three views with one shared memfd, so a write through any view is
     // visible through the others.
-    const int fd = memfd_create("xbox_physical", MFD_CLOEXEC);
+    //
+    // memfd_create IS A SYSCALL WITH A LIBC WRAPPER THAT ARRIVED LATE: glibc has had it
+    // since 2.27, but Bionic only declares it from API 30 — so on an Android 9 or 10
+    // phone this line is a COMPILE error ("use of undeclared identifier"), not a run-time
+    // one, and the failure names a function that plainly exists in the kernel. The syscall
+    // itself is there from Linux 3.17, i.e. on every device this port can run on, so the
+    // fallback below calls it directly. Same behaviour, same flags, one declaration
+    // supplied by us; CW_MIN_ANDROID_API in docs/android-port-plan.md is 26, well below
+    // both the syscall's and the wrapper's floors.
+    const int fd = CwMemfdCreate("xbox_physical");
     if (fd < 0 || ftruncate(fd, off_t(kPhysSize)) != 0)
     {
         perror("runtime: memfd for physical memory");
