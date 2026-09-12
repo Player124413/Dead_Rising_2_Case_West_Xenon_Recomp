@@ -163,8 +163,12 @@ jobs:
 
       - name: build the APK
         run: |
-          tools/android/build_apk.sh --abi "${{ inputs.abi || 'arm64-v8a' }}" 2>&1 | tee apk-build.log
-          exit "${PIPESTATUS[0]}"
+          # Through tools/ci/run_logged.sh, like every other long command in this workflow: it tees
+          # to the same apk-build.log AND, if the build fails, publishes its tail as an annotation.
+          # Logs and artifacts are blob-backed and unreachable through the public API; annotations
+          # are not. Without one, a red step here is a red square with no text behind it anywhere.
+          tools/ci/run_logged.sh apk-build.log \
+            tools/android/build_apk.sh --abi "${{ inputs.abi || 'arm64-v8a' }}"
 
       # What the artifact contains, published whether the build passed or not: a red step whose
       # error text is unreachable cannot be iterated on, and this repo's sessions read CI through
@@ -273,8 +277,7 @@ jobs:
       # gpu/vk_shadow_android.cpp is written for.
       - name: build the x86_64 APK
         run: |
-          tools/android/build_apk.sh --abi x86_64 2>&1 | tee apk-build-x86_64.log
-          exit "${PIPESTATUS[0]}"
+          tools/ci/run_logged.sh apk-build-x86_64.log tools/android/build_apk.sh --abi x86_64
 
       - name: enable KVM
         run: |
@@ -476,10 +479,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: install ninja and unzip
+      - name: install ninja, unzip and the host compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build unzip
+          # clang is installed HERE rather than with the runtime's -dev packages eight steps down,
+          # because the step that builds XenonRecomp comes FIRST and pins the compiler into that
+          # build tree's CMakeCache.txt. A runner image already ships a clang and apt changes what
+          # the bare name resolves to; configuring with one and compiling with the other is not a
+          # hypothetical here, it is what this job did, and the failure it produces names a
+          # compiler in a step that did not choose one.
+          sudo apt-get install -y ninja-build unzip clang
 
       - name: install Gradle ${{ env.GRADLE_VERSION }}
         run: |
@@ -517,9 +526,38 @@ jobs:
 
       - name: build the host XenonRecomp (the tool that generates ppc/)
         run: |
-          cmake -S ../XenonRecomp -B ../XenonRecomp/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build ../XenonRecomp/build --target XenonRecomp -j"$(nproc)"
-          test -x ../XenonRecomp/build/XenonRecomp/XenonRecomp
+          # ../XenonRecomp/build is configured ONCE, here, with the compiler named. The step that
+          # builds the host runtime used to run cmake over this same directory again with clang
+          # after this one had configured it with whatever cc the runner defaulted to — two
+          # compilers and one CMakeCache.txt, which is either a conflict at re-configure or GCC
+          # objects kept and relinked. Everything downstream reads this tree, so this is the only
+          # place it is configured, and build.yml's Linux job pins the same two flags for the same
+          # directory.
+          #
+          # The output is teed to a file because a red step here is otherwise UNREADABLE: the
+          # job-log API does not serve it, and this job's artifact is assembled from log FILES, so
+          # a step that writes none leaves nothing behind. That is precisely what happened the
+          # first time this step failed — the run reported "failure" at this step and there was no
+          # text anywhere to read.
+          # Both through tools/ci/run_logged.sh, which appends to the one xenonrecomp-build.log and
+          # turns a failure into an annotation. This is the step whose first failure was reported as
+          # "Process completed with exit code 1." and nothing more, because the artifact this job
+          # uploads is assembled from log files and this step wrote none.
+          tools/ci/run_logged.sh xenonrecomp-build.log \
+            cmake -S ../XenonRecomp -B ../XenonRecomp/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          tools/ci/run_logged.sh xenonrecomp-build.log \
+            cmake --build ../XenonRecomp/build --target XenonRecomp -j"$(nproc)"
+          BIN=../XenonRecomp/build/XenonRecomp/XenonRecomp
+          if [ ! -x "$BIN" ]; then
+            echo "::error::$BIN is not executable after a build that reported success. Neither the"
+            echo "::error::root CMakeLists.txt, nor XenonRecomp's, nor thirdparty's sets"
+            echo "::error::CMAKE_RUNTIME_OUTPUT_DIRECTORY, so the target's own binary directory is"
+            echo "::error::the expected location. What the tree actually contains:"
+            find ../XenonRecomp/build -maxdepth 2 \( -type d -o -name 'XenonRecomp*' \) -print
+            exit 1
+          fi
 
       - name: generate the guest image
         run: |
@@ -530,8 +568,12 @@ jobs:
           # file_path = "../assets/game/default.xex", out_directory_path = "../ppc",
           # switch_table_file_path = "CaseWest_switch_tables.toml" (committed, so the 205 jump
           # tables do not have to be re-derived here).
-          ( cd config && ../../XenonRecomp/build/XenonRecomp/XenonRecomp \
-              CaseWest.toml ../../XenonRecomp/XenonUtils/ppc_context.h )
+          # bash -c because the command has to run from config/ and run_logged.sh takes a command,
+          # not a subshell. The LOG path is resolved by the wrapper from THIS directory — the
+          # checkout root, where the artifact step looks — and not from the one the tool cd's into.
+          tools/ci/run_logged.sh ppc-generate.log bash -c \
+            'cd config && ../../XenonRecomp/build/XenonRecomp/XenonRecomp \
+               CaseWest.toml ../../XenonRecomp/XenonUtils/ppc_context.h'
           echo "generated $(find ppc -name '*.cpp' | wc -l) .cpp files, $(du -sh ppc | cut -f1)"
 
       - name: verify the generation was not the silent empty-image failure
@@ -573,23 +615,35 @@ jobs:
       # ---------------------------------------------------------------------------------------
       - name: install the host runtime's dependencies
         run: |
+          # Only the runtime's own -dev packages. ninja-build and clang were installed before the
+          # XenonRecomp build because that build pins clang into a CMakeCache.txt; installing clang
+          # again here would be a no-op at best and would move what the bare name resolves to after
+          # the fact at worst.
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang libsdl2-dev libvulkan-dev \
-            libavcodec-dev libavutil-dev
+          sudo apt-get install -y libsdl2-dev libvulkan-dev libavcodec-dev libavutil-dev
 
       - name: build the host runtime (stub image — the shader pass never executes guest code)
         run: |
-          cmake -S ../XenonRecomp -B ../XenonRecomp/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          # No cmake -S ../XenonRecomp here any more. That tree was configured with clang by the
+          # step that built the tool; re-configuring it was the second compiler on one cache. The
+          # three targets are built rather than assumed, and the build is nearly free because the
+          # XenonRecomp executable links all three and so already produced them.
           cmake --build ../XenonRecomp/build --target XenonUtils fmt xxhash -j"$(nproc)"
           python3 tools/gen_stub_ppc.py --out ../stub-ppc --xenon ../XenonRecomp
-          cmake -S runtime -B runtime/build-host -G Ninja \
-            -DCW_PPC_DIR="$PWD/../stub-ppc" \
-            -DXENON_ROOT="$PWD/../XenonRecomp" \
-            -DXENON_BUILD="$PWD/../XenonRecomp/build" \
-            -DXENOS_ROOT="$PWD/../XenosRecomp" \
-            -DCW_XLIVE=OFF
-          cmake --build runtime/build-host -j"$(nproc)" 2>&1 | tail -5
+          # host-runtime-configure.log was listed in this job's artifact paths from the start and
+          # was never written by anything — the name was a promise the steps did not keep. It is
+          # written here. The old `| tail -5` is gone: five lines of a failing CMake configure is
+          # the TAIL of a wall of text whose first line is the error, and run_logged.sh shows the
+          # whole thing on the console while putting the last forty in an annotation.
+          tools/ci/run_logged.sh host-runtime-configure.log \
+            cmake -S runtime -B runtime/build-host -G Ninja \
+              -DCW_PPC_DIR="$PWD/../stub-ppc" \
+              -DXENON_ROOT="$PWD/../XenonRecomp" \
+              -DXENON_BUILD="$PWD/../XenonRecomp/build" \
+              -DXENOS_ROOT="$PWD/../XenosRecomp" \
+              -DCW_XLIVE=OFF
+          tools/ci/run_logged.sh host-runtime-configure.log \
+            cmake --build runtime/build-host -j"$(nproc)"
           test -x runtime/build-host/cw_runtime
 
       - name: build the shader cache from the game's own banks
@@ -608,8 +662,8 @@ jobs:
           # candidate spells, and a variable that exists for exactly this beats a symlink.
           CW_ROOT="$PWD" \
           CW_DXC_LIB="$PWD/../XenosRecomp/thirdparty/dxc-bin/lib/x64/libdxcompiler.so" \
-            runtime/build-host/cw_runtime --build-shader-cache "$BANK" "$PWD/assets/shader_spv" \
-            2>&1 | tee shader-cache.log
+            tools/ci/run_logged.sh shader-cache.log \
+              runtime/build-host/cw_runtime --build-shader-cache "$BANK" "$PWD/assets/shader_spv"
           N=$(find assets/shader_spv -name '*.spv' 2>/dev/null | wc -l)
           echo "shader cache: $N module(s)"
           # The banks are documented at 1,265 distinct pixel shaders. Zero means the pass did not run
@@ -659,9 +713,8 @@ jobs:
           # launcher copies it to <root>/assets/shader_spv/ at first run.
           CW_PPC_DIR="$PWD/ppc" \
           CW_SHADER_SPV="$([ -d assets/shader_spv ] && echo "$PWD/assets/shader_spv")" \
-            tools/android/build_apk.sh --abi "${{ inputs.abi }}" --with-dxc 2>&1 \
-            | tee playable-build.log
-          exit "${PIPESTATUS[0]}"
+            tools/ci/run_logged.sh playable-build.log \
+              tools/android/build_apk.sh --abi "${{ inputs.abi }}" --with-dxc
 
       - name: publish the logs
         if: always()
@@ -670,10 +723,11 @@ jobs:
           name: android-playable-logs
           if-no-files-found: ignore
           path: |
-            playable-build.log
-            apk-build.log
-            shader-cache.log
+            xenonrecomp-build.log
+            ppc-generate.log
             host-runtime-configure.log
+            shader-cache.log
+            playable-build.log
 
       - name: publish the APK, if it was asked for
         if: inputs.artifact != 'logs only'

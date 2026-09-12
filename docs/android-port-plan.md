@@ -488,6 +488,29 @@ diagnostic at all**. So the job counts the mapping table afterwards and fails un
 against a documented 58,448 — a second of work that converts the quietest failure in the pipeline
 into a named one.
 
+Two things about that host build are easy to get wrong and were. `../XenonRecomp/build` is
+configured **once**, by the step that builds the tool, and the later step that builds the host
+runtime only builds targets in it — it used to run `cmake -S` over the same directory again with
+`-DCMAKE_CXX_COMPILER=clang++`, after the first configure had already pinned whatever `cc` the
+runner defaulted to. One build tree, two compilers, and a cache that either rejects the change or
+keeps the first compiler's objects; either way the error names a compiler in a step that did not
+choose one. `clang` is therefore installed at the top of the job rather than with the runtime's
+`-dev` packages eight steps later, since a runner image already ships one and apt changes what the
+bare name resolves to. And the tool's own CMakeLists applies `-Wno-switch`, `-Wno-null-arithmetic`
+and `XENON_RECOMP_USE_ALIAS` **only** under `CMAKE_CXX_COMPILER_ID STREQUAL "Clang"`, so the pin is
+also what makes this the build upstream's own hook mechanism was written against.
+
+**Every long command in the workflow runs through `tools/ci/run_logged.sh`.** GitHub serves step
+verdicts and annotations from the REST API, and step logs and job artifacts from signed blob URLs —
+and this repository is debugged through the API. A failing step that emits no annotation is
+therefore a red square with no text behind it on any channel that works: the first failure of the
+host-XenonRecomp step reported, in full, "Process completed with exit code 1.", because the artifact
+that job uploads is assembled from log *files* and that step wrote none. The wrapper tees to the
+log file the artifact wants and, on failure, publishes its last forty lines as an annotation. It is
+one annotation rather than one per line because GitHub keeps at most ten error annotations per step,
+so the obvious `while read` loop discards thirty of the forty lines it exists to preserve — and what
+it discards is everything after the tenth, which is where a compiler's first diagnostic is.
+
 **Shaders are two steps, and they are the difference between an APK that boots and one that draws.**
 §5.4 is the argument; the mechanics here are that the job builds the *cache* on the runner with the
 x86_64 DXC XenosRecomp already vendors, and cross-compiles DXC *itself* for arm64 so the phone can
