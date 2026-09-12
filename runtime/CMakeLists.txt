@@ -336,15 +336,70 @@ if(ANDROID AND CW_WINDOW AND NOT CW_SDL2_PREFIX)
 endif()
 
 if(CW_WINDOW)
-    find_package(SDL2 QUIET)
+    if(ANDROID)
+        # The NDK's build/cmake/android.toolchain.cmake sets, at its line 102,
+        #
+        #     set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+        #
+        # and ONLY re-roots every path find_package searches under CMAKE_FIND_ROOT_PATH, which the
+        # same file points at the NDK sysroot. The CW_SDL2_PREFIX prepended to CMAKE_PREFIX_PATH
+        # above is an absolute path inside this checkout, so it is searched as <sysroot>/<prefix>,
+        # which does not exist, and the result is a failure indistinguishable from "SDL2 was never
+        # built" — which is what it reads as from the message alone, and is what it read as in the
+        # run that first hit this, on a prefix that had just been built and cached. BOTH searches
+        # the re-rooted path and the real one; PATHS names the prefix outright and NO_DEFAULT_PATH
+        # keeps the host's own SDL2 out of the answer, which is what the comment above this block
+        # has always wanted and what an unprefixed find_package cannot promise.
+        set(_cw_sdl2_find_mode "${CMAKE_FIND_ROOT_PATH_MODE_PACKAGE}")
+        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+        find_package(SDL2 QUIET CONFIG PATHS "${CW_SDL2_PREFIX}" NO_DEFAULT_PATH)
+        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE "${_cw_sdl2_find_mode}")
+    else()
+        find_package(SDL2 QUIET)
+    endif()
     if(NOT SDL2_FOUND)
-        message(FATAL_ERROR
-            "SDL2 not found, and it is what phase 3's window, present seam and pad "
-            "are built on.\n"
-            "  Fedora:  sudo dnf install SDL2-devel   (sdl2-compat-devel also works)\n"
-            "  Debian:  sudo apt install libsdl2-dev\n"
-            "Or build without it deliberately:  cmake -S runtime -B runtime/build "
-            "-DCW_WINDOW=OFF")
+        # Say what was looked at. "Not found" is three different situations — no prefix given, a
+        # prefix that does not exist, and a prefix that exists but was built without the CMake
+        # package or without the static library — and they have different fixes, which the person
+        # reading a CI annotation cannot otherwise tell apart.
+        set(_cw_sdl2_evidence "  CW_SDL2_PREFIX   ${CW_SDL2_PREFIX}")
+        if(NOT CW_SDL2_PREFIX)
+            string(APPEND _cw_sdl2_evidence "   (EMPTY)")
+        elseif(NOT IS_DIRECTORY "${CW_SDL2_PREFIX}")
+            string(APPEND _cw_sdl2_evidence
+                "\n  that directory DOES NOT EXIST, so nothing was ever installed into it")
+        else()
+            string(APPEND _cw_sdl2_evidence "\n  that directory exists; what is in it:")
+            foreach(_cw_sdl2_f
+                    lib/libSDL2.a
+                    lib64/libSDL2.a
+                    lib/cmake/SDL2/sdl2-config.cmake
+                    lib/cmake/SDL2/SDL2Config.cmake
+                    include/SDL2/SDL.h)
+                if(EXISTS "${CW_SDL2_PREFIX}/${_cw_sdl2_f}")
+                    string(APPEND _cw_sdl2_evidence "\n    present   ${_cw_sdl2_f}")
+                else()
+                    string(APPEND _cw_sdl2_evidence "\n    MISSING   ${_cw_sdl2_f}")
+                endif()
+            endforeach()
+        endif()
+        if(ANDROID)
+            message(FATAL_ERROR
+                "SDL2 for ${ANDROID_ABI} was not found, and it is what phase 3's window, present "
+                "seam and pad are built on.\n${_cw_sdl2_evidence}\n"
+                "The host's SDL2 cannot be linked into an ${ANDROID_ABI} library; build one for "
+                "this ABI and toolchain:\n"
+                "  tools/android/build_sdl2_android.sh <prefix>\n"
+                "android/app/build.gradle.kts passes -DCW_SDL2_PREFIX for it.")
+        else()
+            message(FATAL_ERROR
+                "SDL2 not found, and it is what phase 3's window, present seam and pad "
+                "are built on.\n${_cw_sdl2_evidence}\n"
+                "  Fedora:  sudo dnf install SDL2-devel   (sdl2-compat-devel also works)\n"
+                "  Debian:  sudo apt install libsdl2-dev\n"
+                "Or build without it deliberately:  cmake -S runtime -B runtime/build "
+                "-DCW_WINDOW=OFF")
+        endif()
     endif()
 endif()
 
