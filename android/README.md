@@ -126,12 +126,12 @@ silent empty-image failure the devkit key causes, and builds an APK whose guest 
 own code. **Prefer the secret**: this repository is public and a dispatch input is recorded on the
 public run page.
 
-It builds the shader cache on the runner from the package's own banks and cross-compiles DXC for
-arm64 (`tools/android/build_dxc.sh`, an LLVM build — there is no prebuilt one to download), so the
-artifact draws. The vertex half of the cache is still absent, because it needs
-`tools/release/vs_recipes.bin` and that file is generated from a machine that has run the game;
+It builds the shader cache on the runner from the package's own banks — pixel shaders verbatim plus
+102 of the 104 vertex shaders, via the tracked `tools/release/vs_recipes.bin` — and cross-compiles
+DXC for arm64 (`tools/android/build_dxc.sh`, an LLVM build; there is no prebuilt one to download) for
+the two that remain, which are engine-synthesised and bound before the first frame.
 `docs/android-port-plan.md` §5.4 and §10.1 carry the argument, and the job's closing summary prints
-what the artifact you just got actually contains.
+the module count and names the residue rather than leaving either to inference.
 
 A release build needs a keystore (`cw.keystore`, `cw.keystorePassword`, `cw.keyAlias`,
 `cw.keyPassword`, never in git). Without one, `assembleRelease` signs with the debug key so the
