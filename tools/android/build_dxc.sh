@@ -130,41 +130,171 @@ rm -rf "$BUILD" && mkdir -p "$BUILD"
 # is included only under LLVM_USE_HOST_TOOLS, which the nested configure does not set: it is not
 # cross-compiling, it IS the host.
 #
-# The compiler is left for CMake to choose, deliberately. Whichever clang++ is first on PATH in this
-# job is the NDK's, invoked bare, which defaults to the host triple rather than the Android one —
-# and the previous run proved it compiles these sources for the host, nineteen files deep, before
-# reaching the one that needed exceptions. Naming a compiler here would replace an observed working
-# choice with an assumed one.
+# WHICH COMPILER BUILDS THE HOST HALF. The run that produced that error left it to CMake's search,
+# and the compile line in its log named
+#
+#     /usr/local/lib/android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++
+#
+# Bare, that driver targets the host, and it did compile nineteen files of lib/Support — but file
+# twenty was the one that threw, so nothing in that tree ever reached a LINK, and compiling is not
+# the half that matters: a driver carrying the NDK's own sysroot and libc++ resolving host headers
+# says nothing about it resolving host libraries. The command line was truncated in the only copy of
+# that log reachable from here, so how CMake's search arrived at it was never established — and does
+# not need to be, because naming a compiler removes the search. Absolute candidates are tried before
+# PATH, any resolved path inside an NDK is rejected, and a machine with no host compiler fails here
+# with both names printed rather than silently inheriting the one that builds for the phone.
 # ---------------------------------------------------------------------------------------------
-mkdir -p "$BUILD/NATIVE"
-echo "==> configuring the HOST tools DXC's cross build runs (NATIVE/, exceptions and RTTI on)"
-cmake -S "$SRC" -B "$BUILD/NATIVE" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLVM_TARGETS_TO_BUILD=None \
-    -DLLVM_ENABLE_EH=ON \
-    -DLLVM_ENABLE_RTTI=ON \
-    >"$BUILD/native-configure.log" 2>&1 \
-    || { echo "FAIL: the NATIVE (host tools) configure did not complete." >&2
-         tail -60 "$BUILD/native-configure.log"; exit 1; }
-grep -q ':.*=ON$' <<<"$(grep -m1 '^LLVM_ENABLE_EH:' "$BUILD/NATIVE/CMakeCache.txt" || true)" \
-    && echo "    LLVM_ENABLE_EH is ON in NATIVE/CMakeCache.txt" \
-    || { echo "FAIL: NATIVE/CMakeCache.txt does not record LLVM_ENABLE_EH=ON, so DXC's" >&2
-         echo "      ErrorHandling.cpp will be compiled with -fno-exceptions again." >&2
-         echo "      It says: $(grep -m1 '^LLVM_ENABLE_EH:' "$BUILD/NATIVE/CMakeCache.txt" || echo 'nothing')" >&2
-         exit 1; }
+# What counts as "inside the NDK" is taken from the machine rather than guessed at it: _ndk.sh, which
+# this script sourced above and whose cw_require_ndk already ran, sets CW_CLANGXX to the ABI wrapper
+# in the NDK's bin/, so that file's directory is precisely the directory to refuse. Path patterns are
+# kept as well for a second NDK that _ndk.sh never looked at, and *android-ndk* is among them because
+# the standalone zip unpacked to /opt/android-ndk-r27c matches neither `sdk/ndk` nor `ndk-bundle` — a
+# gap a dry run of this function found, which is cheaper than the hour-deep run that would have.
+NDK_BIN_DIR=$(dirname "${CW_CLANGXX:-/nonexistent}")
+pick_host_compiler() {
+    local c resolved
+    for c in "$@"; do
+        [ -n "$c" ] || continue
+        resolved=$(command -v "$c" 2>/dev/null) || continue
+        case "$resolved" in
+            "$NDK_BIN_DIR"/*) continue ;;
+            */sdk/ndk/*|*/Sdk/ndk/*|*/ndk-bundle/*|*android-ndk*) continue ;;
+        esac
+        printf '%s\n' "$resolved"
+        return 0
+    done
+    return 1
+}
+
+# A host tool that will not RUN is worse than one that is missing. It is the wrong artifact in
+# exactly the right place: DXC finds the file, tries to execute it, and fails an hour into the cross
+# build with "cannot execute binary file" in a log about arm64. --version is the cheapest thing that
+# proves this machine can execute it, and --help is tried as well because a tblgen that wants a mode
+# argument may reject one and accept the other; both failing is the verdict, and the tool's own
+# output is printed with it.
+host_tool_runs() {
+    local out
+    out=$("$1" --version 2>&1) && { printf '%s\n' "$out"; return 0; }
+    out=$("$1" --help 2>&1) && { printf '%s\n' "$out"; return 0; }
+    printf '%s\n' "$out"
+    return 1
+}
+
+# `file -b` next to the verdict, so a wrong architecture is named rather than merely reported.
+verify_host_tool() {
+    local bin=$1 out
+    printf '    %-14s %s\n' "$(basename "$bin")" \
+        "$(file -b "$bin" 2>/dev/null || echo 'file(1) unavailable')"
+    if out=$(host_tool_runs "$bin"); then
+        echo "      executes: $(sed -n 1p <<<"$out")"
+    else
+        echo "FAIL: $bin is there but this machine cannot execute it." >&2
+        echo "      DXC's cross build RUNS its host tblgen. Built for the phone, it fails there," >&2
+        echo "      an hour deep, in a log that is otherwise entirely about arm64." >&2
+        sed -n '1,10p' <<<"$out" >&2
+        return 1
+    fi
+}
+
+HOST_CC=${CW_DXC_HOST_CC:-}
+HOST_CXX=${CW_DXC_HOST_CXX:-}
+if [ -z "$HOST_CXX" ]; then
+    HOST_CXX=$(pick_host_compiler /usr/bin/clang++ /usr/bin/g++ clang++ g++ c++) || HOST_CXX=
+fi
+if [ -z "$HOST_CC" ]; then
+    HOST_CC=$(pick_host_compiler /usr/bin/clang /usr/bin/gcc clang gcc cc) || HOST_CC=
+fi
+if [ -z "$HOST_CC" ] || [ -z "$HOST_CXX" ]; then
+    echo "FAIL: no host compiler outside the NDK (C: '${HOST_CC:-none}', C++: '${HOST_CXX:-none}')." >&2
+    echo "      NATIVE/ has to produce tools this machine runs; the NDK's clang produces code for" >&2
+    echo "      the phone. Set CW_DXC_HOST_CC and CW_DXC_HOST_CXX to override the search." >&2
+    exit 1
+fi
+echo "==> host compilers for NATIVE/: $HOST_CC / $HOST_CXX"
+# A machine that already has host tblgens does not have to build LLVM's, and cmake/modules/
+# TableGen.cmake is where that is decided — by testing LLVM_TABLEGEN / CLANG_TABLEGEN against the
+# target's own name:
+#
+#     if( ${${project}_TABLEGEN} STREQUAL "${target}" )                    # TableGen.cmake:95
+#         set(${project}_TABLEGEN_EXE "${LLVM_NATIVE_BUILD}/bin/${target}")
+#         add_custom_command(OUTPUT ${${project}_TABLEGEN_EXE}
+#           COMMAND ${CMAKE_COMMAND} --build . --target ${target} --config Release
+#           WORKING_DIRECTORY ${LLVM_NATIVE_BUILD}
+#           COMMENT "Building native TableGen...")
+#
+# So LLVM_TABLEGEN is the input and LLVM_TABLEGEN_EXE is what that block ASSIGNS, with a plain set()
+# in function scope that shadows a cache entry of the same name for the rest of the configure. This
+# hatch used to pass -DLLVM_TABLEGEN_EXE=: the block overwrote it, the native build ran anyway, and
+# the variable did nothing at all. A hatch that silently does not work is worse than no hatch,
+# because whoever sets it has said they cannot afford the LLVM build. It takes a DIRECTORY now, since
+# these are two different binaries and one path cannot be both.
+EXTRA_TABLEGEN=()
+if [ -n "${CW_DXC_HOST_TBLGEN_DIR:-}" ]; then
+    echo "==> host tblgens from $CW_DXC_HOST_TBLGEN_DIR — NATIVE/ is not built"
+    for t in llvm-tblgen clang-tblgen; do
+        [ -x "$CW_DXC_HOST_TBLGEN_DIR/$t" ] \
+            || { echo "FAIL: $CW_DXC_HOST_TBLGEN_DIR/$t is missing or not executable." >&2; exit 1; }
+    done
+    EXTRA_TABLEGEN+=("-DLLVM_TABLEGEN=$CW_DXC_HOST_TBLGEN_DIR/llvm-tblgen" \
+                     "-DCLANG_TABLEGEN=$CW_DXC_HOST_TBLGEN_DIR/clang-tblgen")
+    verify_host_tool "$CW_DXC_HOST_TBLGEN_DIR/llvm-tblgen"
+else
+    mkdir -p "$BUILD/NATIVE"
+    echo "==> configuring the HOST tools DXC's cross build runs (NATIVE/, exceptions and RTTI on)"
+    cmake -S "$SRC" -B "$BUILD/NATIVE" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+        -DLLVM_TARGETS_TO_BUILD=None \
+        -DLLVM_ENABLE_EH=ON \
+        -DLLVM_ENABLE_RTTI=ON \
+        >"$BUILD/native-configure.log" 2>&1 \
+        || { echo "FAIL: the NATIVE (host tools) configure did not complete." >&2
+             tail -60 "$BUILD/native-configure.log" >&2; exit 1; }
+    EHL=$(grep -m1 '^LLVM_ENABLE_EH:' "$BUILD/NATIVE/CMakeCache.txt" || true)
+    if grep -q ':.*=ON$' <<<"$EHL"; then
+        echo "    LLVM_ENABLE_EH is ON in NATIVE/CMakeCache.txt"
+    else
+        echo "FAIL: NATIVE/CMakeCache.txt does not record LLVM_ENABLE_EH=ON, so DXC's" >&2
+        echo "      ErrorHandling.cpp will be compiled with -fno-exceptions again." >&2
+        echo "      It says: ${EHL:-nothing}" >&2
+        exit 1
+    fi
+    echo "    $(grep -m1 '^CMAKE_CXX_COMPILER:' "$BUILD/NATIVE/CMakeCache.txt" \
+        || echo 'NATIVE/CMakeCache.txt records no CMAKE_CXX_COMPILER')"
+
+    # Built here rather than left to the custom command above, for a reason that is entirely about
+    # reading a failure: TableGen.cmake drives this build from INSIDE the 1,327-edge cross build, so
+    # when it fails the reason arrives as one "FAILED: NATIVE/bin/llvm-tblgen" among unrelated arm64
+    # compile lines — which is exactly how two consecutive runs presented an ErrorHandling.cpp error
+    # that had nothing to do with arm64. Here it has its own log and its own tail, and by the time
+    # DXC asks for the same target it is up to date and the nested command is a no-op.
+    # One invocation per target, so a failure names the target rather than leaving two candidates.
+    echo "==> building the HOST tools (llvm-tblgen, clang-tblgen)"
+    :>"$BUILD/native-build.log"
+    for t in llvm-tblgen clang-tblgen; do
+        cmake --build "$BUILD/NATIVE" --target "$t" --config Release \
+            >>"$BUILD/native-build.log" 2>&1 \
+            || { echo "FAIL: the NATIVE build of $t did not complete, and DXC's cross build cannot" >&2
+                 echo "      generate a single table without it. Tail of $BUILD/native-build.log:" >&2
+                 tail -60 "$BUILD/native-build.log" >&2; exit 1; }
+        [ -x "$BUILD/NATIVE/bin/$t" ] \
+            || { echo "FAIL: $BUILD/NATIVE/bin/$t is absent after a build that reported success." >&2
+                 exit 1; }
+    done
+    verify_host_tool "$BUILD/NATIVE/bin/llvm-tblgen"
+    # clang-tblgen is not executed. It wants a mode argument, so a refusal to run would prove
+    # nothing; its architecture is printed instead, and llvm-tblgen — same tree, same driver, same
+    # link step — is what proves the host can run what this build produces.
+    printf '    %-14s %s\n' clang-tblgen \
+        "$(file -b "$BUILD/NATIVE/bin/clang-tblgen" 2>/dev/null || echo 'file(1) unavailable')"
+fi
 
 # cmake/caches/PredefinedParams.cmake is DXC's own set of required options, and it is passed with
 # -C the way DXC's docs say to: it runs before the root CMakeLists, and the -D flags below override
 # it (the cache script cannot override an explicit command-line parameter). What it gives us that
 # matters here is LLVM_TARGETS_TO_BUILD=None, LLVM_ENABLE_EH/RTTI=ON and ENABLE_SPIRV_CODEGEN=ON.
 # It reaches THIS configure only — hence the NATIVE one above.
-EXTRA_TABLEGEN=()
-if [ -n "${CW_DXC_HOST_TABLEGEN:-}" ]; then
-    # An escape hatch for a machine that already has a matching host llvm-tblgen: LLVM's cross
-    # build otherwise compiles its own into $BUILD/NATIVE, which is correct and costs minutes.
-    EXTRA_TABLEGEN+=("-DLLVM_TABLEGEN_EXE=$CW_DXC_HOST_TABLEGEN")
-fi
-
 echo "==> configuring (tests off, lld, $JOBS compile / $LINK_JOBS link jobs)"
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -C "$SRC/cmake/caches/PredefinedParams.cmake" \
