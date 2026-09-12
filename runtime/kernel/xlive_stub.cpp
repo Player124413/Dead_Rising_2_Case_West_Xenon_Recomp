@@ -18,7 +18,7 @@
 // so a declaration that drifts is a compile error HERE rather than an undefined symbol in
 // somebody's link. 
 // 40 functions, copied verbatim from the headers above.
-// 1 declared but not stubbed, because the kernel defines them either way.
+// 1 declared but not stubbed, because the kernel defines it either way.
 
 #include "xlive_glue.h"
 #include "xlive_session.h"

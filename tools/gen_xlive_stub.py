@@ -323,7 +323,8 @@ def render(decls_by_header):
     text = '\n'.join(out).rstrip() + '\n'
     note = '\n// %d functions, copied verbatim from the headers above.' % total
     if skipped:
-        note += '\n// %d declared but not stubbed, because the kernel defines them either way.' % skipped
+        note += '\n// %d declared but not stubbed, because the kernel defines %s either way.' % (
+            skipped, 'it' if skipped == 1 else 'them')
     return text.replace('__COUNT__', note)
 
 
