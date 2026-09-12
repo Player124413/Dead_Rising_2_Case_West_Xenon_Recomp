@@ -86,7 +86,11 @@ if [ ! -d "$SRC/.git" ]; then
 else
     echo "==> updating the existing clone"
     git -C "$SRC" fetch --depth 1 origin "refs/tags/$REF:refs/tags/$REF" >/dev/null 2>&1 || true
-    git -C "$SRC" checkout "$REF" >/dev/null
+    # advice.detachedHead off: checking out a tag puts the clone in detached HEAD, which is the
+    # intended state here, and git's five lines of advice about it — "Or undo this operation with:
+    # git switch -", "Turn off this advice by setting config variable..." — go to stderr, so
+    # >/dev/null does not reach them and they land in the middle of a build log. Errors still print.
+    git -C "$SRC" -c advice.detachedHead=false checkout "$REF" >/dev/null
 fi
 git -C "$SRC" log -1 --format='    commit %h  %ad  %s' --date=short
 
@@ -168,16 +172,43 @@ pick_host_compiler() {
 
 # A host tool that will not RUN is worse than one that is missing. It is the wrong artifact in
 # exactly the right place: DXC finds the file, tries to execute it, and fails an hour into the cross
-# build with "cannot execute binary file" in a log about arm64. --version is the cheapest thing that
-# proves this machine can execute it, and --help is tried as well because a tblgen that wants a mode
-# argument may reject one and accept the other; both failing is the verdict, and the tool's own
-# output is printed with it.
+# build with "cannot execute binary file" in a log about arm64.
+#
+# The first version of this guard asked the tool for --version and then --help, and treated a refusal
+# of both as proof it could not run. It rejected a correctly built x86-64 PIE executable, because
+# LLVM's cl library spells options with ONE dash and answered:
+#
+#     llvm-tblgen: Unknown command line argument '--help'.  Try: 'llvm-tblgen -help'
+#
+# That line is the tool RUNNING — the very evidence the guard was after, printed in the output the
+# guard threw away. A question about executability must not be a question about argument spelling, so
+# this classifies by how the execution ended rather than by whether the tool was pleased:
+#
+#     0        it ran and answered.
+#     126      the shell found the file and could not execute it: wrong architecture
+#              ("cannot execute binary file: Exec format error") or no permission.
+#     127      it was not found, or the dynamic loader could not resolve a library
+#              ("error while loading shared libraries") — which is what a tblgen linked against a
+#              libc++ that is not on the host produces, and is not a spelling complaint.
+#     anything else, the program ran and objected. That is a pass, and its objection is printed,
+#              because a guard that hides what it saw is how the last one came to be wrong.
+#
+# -version is asked first because it is the spelling LLVM's cl library actually accepts, so the
+# common case is a clean exit 0 rather than a classified objection.
 host_tool_runs() {
-    local out
-    out=$("$1" --version 2>&1) && { printf '%s\n' "$out"; return 0; }
-    out=$("$1" --help 2>&1) && { printf '%s\n' "$out"; return 0; }
-    printf '%s\n' "$out"
-    return 1
+    local out status
+    out=$("$1" -version 2>&1) && status=0 || status=$?
+    case "$status" in
+        0)       printf '%s\n' "$out"; return 0 ;;
+        126|127) printf '%s\n' "status $status: $out"; return 1 ;;
+    esac
+    case "$out" in
+        *"cannot execute binary file"*|*"Exec format error"*|*"Permission denied"*\
+        |*"error while loading shared libraries"*|*"No such file or directory"*)
+            printf '%s\n' "status $status: $out"; return 1 ;;
+    esac
+    printf '%s\n' "ran and answered (status $status): $(sed -n 1p <<<"$out")"
+    return 0
 }
 
 # `file -b` next to the verdict, so a wrong architecture is named rather than merely reported.
