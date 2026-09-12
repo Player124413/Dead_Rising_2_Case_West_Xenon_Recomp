@@ -122,6 +122,15 @@ val adrenotoolsJniLibs =
     file(prop("cw.adrenotoolsJniLibs", "${prebuilt}/adrenotools/jniLibs")).absoluteFile
 val haveAdrenotools = File(adrenotoolsPrefix, "include/adrenotools/driver.h").exists()
 
+// DXC, from tools/android/build_dxc.sh. Also OPTIONAL at build time and also written for its
+// absence, but the consequence differs in kind: an APK without adrenotools renders on the device's
+// own Vulkan driver, while an APK without libdxcompiler.so cannot translate a single shader and so
+// cannot draw at all. A warning rather than an error because the stub-image artifact CI builds on
+// every pull request has no shaders to translate either, and failing that build over a library only
+// a playable artifact needs would be the wrong trade.
+val dxcJniLibs = file(prop("cw.dxcJniLibs", "${prebuilt}/dxc/jniLibs")).absoluteFile
+val haveDxc = File(dxcJniLibs, "libdxcompiler.so").exists()
+
 // Resolved here rather than inside nested string templates: `"${prop("a", "${b}/c")}"` is legal
 // Kotlin and is also the kind of line that gets edited wrong, and the two prefixes are used twice
 // each (once in the arguments, once in the configure-time summary below).
@@ -137,6 +146,24 @@ val optionalArgs: List<String> = buildList {
     if (ppcDir.isNotEmpty()) add("-DCW_PPC_DIR=${file(ppcDir).absolutePath}")
     if (haveAdrenotools) add("-DCW_ADRENOTOOLS_PREFIX=$adrenotoolsPrefix")
 }
+// The one combination that produces an APK which boots to a black screen: a REAL guest image with
+// no compiler to translate its shaders. The stub image gets a pass because it never reaches a draw.
+if (!haveDxc && ppcDir.isNotEmpty() && File(ppcDir, "ppc_func_mapping.cpp").exists()) {
+    logger.warn(
+        """
+        cw: packaging a REAL guest image with no libdxcompiler.so at $dxcJniLibs.
+
+        That APK boots, loads the title's own code, reaches the renderer, and then refuses every
+        shader translation — the disc's 1,265 pixel shaders and all 104 vertex shaders alike. The
+        screen stays black and the log says "[shxlate] no dxcompiler library found" once, which is
+        easy to miss under a page of per-shader refusals.
+
+        tools/android/build_dxc.sh $abi        (an LLVM build; no prebuilt arm64 DXC exists)
+        or drop a libdxcompiler.so into        $dxcJniLibs
+        """.trimIndent()
+    )
+}
+
 if (!haveAdrenotools) {
     logger.warn(
         "cw: no libadrenotools at $adrenotoolsPrefix — building WITHOUT custom GPU driver " +
@@ -242,6 +269,13 @@ android {
                 // compile, and they have to land in nativeLibraryDir as real extracted files
                 // — which is what packaging.jniLibs.useLegacyPackaging below guarantees.
                 jniLibs.srcDir(adrenotoolsJniLibs)
+            }
+            if (haveDxc) {
+                // libdxcompiler.so. nativeLibraryDir IS HostPaths::ExeDir() on Android, and
+                // ExeDir()/libdxcompiler.so is already one of gpu/shader_translator.cpp's dlopen
+                // candidates — so packaging it here is the entire integration. No CW_DXC_LIB, no
+                // launcher row, no code anywhere that knows this file exists.
+                jniLibs.srcDir(dxcJniLibs)
             }
         }
     }
@@ -357,6 +391,7 @@ logger.lifecycle(
       SDL Java        $sdlJavaDir
       ffmpeg (static) $ffmpegPrefix
       adrenotools     ${if (haveAdrenotools) adrenotoolsPrefix.toString() else "ABSENT — no custom GPU drivers"}
+      DXC               ${if (haveDxc) "libdxcompiler.so from $dxcJniLibs" else "ABSENT — no shader translation on the device"}
       guest image     ${if (ppcDir.isNotEmpty()) ppcDir else "sibling ppc/ (default)"}
       extra cmake     ${optionalArgs.joinToString(" ").ifEmpty { "(none)"}}
     """.trimIndent()

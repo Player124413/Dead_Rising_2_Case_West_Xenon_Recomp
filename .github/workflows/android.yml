@@ -344,21 +344,34 @@ jobs:
   # with the PATCHED host XenonRecomp, verify the generation actually happened, cross-compile the
   # four dependencies, and build an APK whose guest image is the title's own 58k functions.
   #
-  # WHAT IT STILL DOES NOT GIVE YOU: shaders. Both paths that produce them need DXC — the
-  # first-run disc pass (gpu/shader_prebuild.cpp) reads data/shaders/deadrisingepilogue-{ps,vs}.big
-  # out of the PACKAGE, and the translate-on-first-sight path needs a library the phone does not
-  # have, there being no prebuilt arm64 libdxcompiler.so anywhere. So a dispatch that supplies a
-  # bare default.xex gets a correct ppc/ and no cache at all: the banks are not in the executable.
-  # The APK boots, loads the real image and refuses each shader translation with one log line — see
-  # the closing summary this job prints, which names both ways to fix it.
+  # SHADERS ARE TWO STEPS HERE, AND THEY ARE THE DIFFERENCE BETWEEN AN APK THAT BOOTS AND ONE THAT
+  # DRAWS. gpu/shader_translator.cpp dlopens libdxcompiler.so and nothing else in the pipeline
+  # compiles anything: microcode -> HLSL is XenosRecomp's recompiler inside the runtime, HLSL ->
+  # SPIR-V is DXC. So this job
+  #
+  #   * builds the CACHE on the runner from the game's own banks, with the x86_64 DXC XenosRecomp
+  #     already vendors — SPIR-V is architecture-independent and the cache key is the hash of the
+  #     MICROCODE, so what an x86_64 runner writes is what an arm64 phone looks up;
+  #   * cross-compiles DXC ITSELF for arm64 (--with-dxc: an LLVM build, tools/android/build_dxc.sh)
+  #     because no prebuilt one exists — Microsoft ships Linux x86_64 only, in every release
+  #     including v1.9.2607 — and packages it as a jniLib, which lands in nativeLibraryDir, which
+  #     IS HostPaths::ExeDir() on Android, which gpu/shader_translator.cpp already searches.
+  #
+  # Give this job the STFS PACKAGE, not a bare default.xex: the banks are in data/, and the
+  # executable does not contain them. With a bare XEX the job still produces a correct ppc/ and a
+  # correct DXC, and every shader is then translated on the phone at first sight instead.
   # -----------------------------------------------------------------------------------------
   playable:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Generating 58k functions and then compiling 228 arm64 translation units of them, on a
-    # 4-core runner, is not a fast job. The limit is set from what the steps need rather than
-    # from a default, because a job cancelled at 360 minutes with no artifact is indistinguishable
-    # from a job that hung.
+    # 360 is GitHub's CEILING for a job on a hosted runner, not a guess, and this job can reach it:
+    # generating 58k functions, compiling 228 arm64 translation units of them, translating ~1,265
+    # pixel shaders and cross-compiling LLVM's DXC are all in the same run on four cores. What makes
+    # that tolerable is that every expensive step except the guest image is cached — the four
+    # dependencies, the DXC prefix, and the Gradle caches — so a re-run pays for generation, the
+    # image and the shader pass only. ppc/ is deliberately NOT cached: it is game-derived, and this
+    # job's whole posture is that such data is present for one dispatch by one person rather than
+    # stored somewhere it persists.
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
@@ -513,6 +526,81 @@ jobs:
             exit 1
           fi
 
+      # ---------------------------------------------------------------------------------------
+      # The shader cache, built HERE rather than on the phone.
+      #
+      # gpu/shader_prebuild.cpp reads the game's own banks — data/shaders/deadrisingepilogue-ps.big
+      # holds 1,265 distinct pixel shaders with their runtime microcode verbatim — and translates
+      # every one the cache does not hold. It needs DXC, and on THIS runner DXC is the x86_64
+      # library XenosRecomp already vendors, which is the cheap half of the problem: SPIR-V is
+      # architecture-independent and the cache key is the hash of the MICROCODE rather than of the
+      # compiler, so a cache built on x86_64 is exactly what an arm64 device looks up.
+      #
+      # The host runtime that runs the pass is built against the STUB guest image, and that is not
+      # a shortcut that changes the result: --build-shader-cache is a CLI branch that returns
+      # before the guest exists, and the pass is pure host code (decode .big -> decode .po/.vo ->
+      # HLSL -> SPIR-V). Linking the real 58k-function image here would cost an hour to produce a
+      # binary that never calls into it.
+      # ---------------------------------------------------------------------------------------
+      - name: install the host runtime's dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang libsdl2-dev libvulkan-dev \
+            libavcodec-dev libavutil-dev
+
+      - name: build the host runtime (stub image — the shader pass never executes guest code)
+        run: |
+          cmake -S ../XenonRecomp -B ../XenonRecomp/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          cmake --build ../XenonRecomp/build --target XenonUtils fmt xxhash -j"$(nproc)"
+          python3 tools/gen_stub_ppc.py --out ../stub-ppc --xenon ../XenonRecomp
+          cmake -S runtime -B runtime/build-host -G Ninja \
+            -DCW_PPC_DIR="$PWD/../stub-ppc" \
+            -DXENON_ROOT="$PWD/../XenonRecomp" \
+            -DXENON_BUILD="$PWD/../XenonRecomp/build" \
+            -DXENOS_ROOT="$PWD/../XenosRecomp" \
+            -DCW_XLIVE=OFF
+          cmake --build runtime/build-host -j"$(nproc)" 2>&1 | tail -5
+          test -x runtime/build-host/cw_runtime
+
+      - name: build the shader cache from the game's own banks
+        run: |
+          BANK=assets/game/data/shaders/deadrisingepilogue-ps.big
+          if [ ! -f "$BANK" ]; then
+            echo "::warning::$BANK is not here, so no shader cache can be built. That means a bare"
+            echo "::warning::default.xex was supplied rather than the STFS package: the executable"
+            echo "::warning::holds no .big archives, and they are the only source of shader"
+            echo "::warning::microcode. The APK still boots; every shader is then translated on the"
+            echo "::warning::phone at first sight, which needs the DXC built below."
+            exit 0
+          fi
+          # CW_DXC_LIB rather than relying on the search order: the vendored dxc-bin is a sibling
+          # checkout here (../XenosRecomp), not the $HOME/GithubRepo/XenosRecomp the dev-layout
+          # candidate spells, and a variable that exists for exactly this beats a symlink.
+          CW_ROOT="$PWD" \
+          CW_DXC_LIB="$PWD/../XenosRecomp/thirdparty/dxc-bin/lib/x64/libdxcompiler.so" \
+            runtime/build-host/cw_runtime --build-shader-cache "$BANK" "$PWD/assets/shader_spv" \
+            2>&1 | tee shader-cache.log
+          N=$(find assets/shader_spv -name '*.spv' 2>/dev/null | wc -l)
+          echo "shader cache: $N module(s)"
+          # The banks are documented at 1,265 distinct pixel shaders. Zero means the pass did not run
+          # at all — a wrong bank, or DXC missing — and is worth failing on rather than shipping an
+          # APK that quietly translates everything on a phone CPU instead.
+          if [ "$N" -eq 0 ]; then
+            echo "::error::the shader pass produced nothing. In shader-cache.log look for the DXC"
+            echo "::error::load line ([shxlate] dxcompiler: ...) and for the bank's own header."
+            exit 1
+          fi
+          # The vertex half is reported rather than required: it needs tools/release/vs_recipes.bin,
+          # which is NOT in this repository because tools/vs_recipes.py generates it from a
+          # microcode dump of a machine that has run the game. Without it the pass is pixel-only by
+          # design and every vertex shader falls to first sight on the device.
+          if [ ! -f tools/release/vs_recipes.bin ]; then
+            echo "no vs_recipes.bin: the cache is PIXEL-ONLY and all 104 vertex shaders will be"
+            echo "translated on the phone at first sight — the session-one pop-in part 102 removed"
+            echo "for desktop. Drop tools/release/vs_recipes.bin in to close it."
+          fi
+
       - name: cache the cross-compiled dependencies
         uses: actions/cache@v4
         with:
@@ -520,6 +608,7 @@ jobs:
             third_party/android/${{ inputs.abi }}/sdl2
             third_party/android/${{ inputs.abi }}/ffmpeg
             third_party/android/${{ inputs.abi }}/adrenotools
+            third_party/android/${{ inputs.abi }}/dxc
             third_party/android/sdl-java
             ../XenonRecomp/build-android-${{ inputs.abi }}
           key: cw-android-deps-${{ inputs.abi }}-${{ hashFiles('tools/android/**', 'android/gradle.properties') }}
@@ -527,7 +616,14 @@ jobs:
 
       - name: build the APK from the real image
         run: |
-          CW_PPC_DIR="$PWD/ppc" tools/android/build_apk.sh --abi "${{ inputs.abi }}" 2>&1 \
+          # --with-dxc is what makes this artifact playable rather than merely real: with no
+          # arm64 libdxcompiler.so the phone cannot translate a shader, and the vertex half is
+          # never in the cache above (no vs_recipes.bin), so it would be refused at the draw
+          # that first binds it. CW_SHADER_SPV stages the cache into the APK's assets and the
+          # launcher copies it to <root>/assets/shader_spv/ at first run.
+          CW_PPC_DIR="$PWD/ppc" \
+          CW_SHADER_SPV="$([ -d assets/shader_spv ] && echo "$PWD/assets/shader_spv")" \
+            tools/android/build_apk.sh --abi "${{ inputs.abi }}" --with-dxc 2>&1 \
             | tee playable-build.log
           exit "${PIPESTATUS[0]}"
 
@@ -540,6 +636,8 @@ jobs:
           path: |
             playable-build.log
             apk-build.log
+            shader-cache.log
+            host-runtime-configure.log
 
       - name: publish the APK, if it was asked for
         if: inputs.artifact != 'logs only'
@@ -558,38 +656,34 @@ jobs:
       - name: what this artifact is, and what it still needs
         if: always()
         run: |
+          SPV=$(find assets/shader_spv -name '*.spv' 2>/dev/null | wc -l)
+          DXC=$(find third_party/android -name libdxcompiler.so 2>/dev/null | head -1)
           echo "==================== READ THIS ===================="
           echo "guest image : REAL (generated from your XEX in this run)"
           echo "abi         : ${{ inputs.abi }}"
           echo "published   : ${{ inputs.artifact }}"
+          echo "shader cache: ${SPV} module(s) built on this runner from the game's own banks"
+          echo "              (the documented expectation for the pixel half is 1,265)"
+          echo "device DXC  : ${DXC:-NONE — shaders cannot be translated on the phone}"
           echo
-          echo "It will boot, run the title's own code, and reach the renderer. Whether it"
-          echo "draws anything depends on DXC, which nothing on this runner can supply for"
-          echo "arm64: BOTH shader paths go through it."
+          if [ "${SPV:-0}" -eq 0 ]; then
+            echo "THE CACHE IS EMPTY, which means the banks were not here: a bare default.xex"
+            echo "was supplied instead of the STFS package. Every shader is then a first-sight"
+            echo "translation on the phone, which works only if the device DXC line above is not"
+            echo "NONE, and is slow the first time it happens."
+          else
+            echo "The pixel half travels inside the APK, so the phone does not translate those."
+            echo "The VERTEX half does not, and cannot be built here: it needs tools/release/"
+            echo "vs_recipes.bin, which is not in this repository because tools/vs_recipes.py"
+            echo "generates it from a microcode dump of a machine that has run the game. So all"
+            echo "104 vertex shaders are first-sight translations on the phone — the session-one"
+            echo "pop-in part 102 removed for desktop, back again by necessity. Drop that file"
+            echo "into tools/release/ and re-run to close it."
+          fi
           echo
-          echo "  * The first-run pass (gpu/shader_prebuild.cpp) builds the cache headlessly"
-          echo "    from the game's own banks, data/shaders/deadrisingepilogue-{ps,vs}.big —"
-          echo "    so it needs the PACKAGE, not a bare default.xex, and it needs DXC to"
-          echo "    translate what it decodes."
-          echo "  * The vertex half additionally needs tools/release/vs_recipes.bin, which is"
-          echo "    NOT in this repository: tools/vs_recipes.py generates it from a microcode"
-          echo "    dump of a machine that has run the game. Without it the pass is"
-          echo "    pixel-only and every vertex shader falls to first sight, on the phone."
-          echo "  * On the phone, translating means an arm64 libdxcompiler.so, and Microsoft"
-          echo "    ships dxc for x86/x64 Linux only."
-          echo
-          echo "Two ways to finish it, pick one:"
-          echo
-          echo "  A. Build the cache on a desktop that can run the game once, then rebuild:"
-          echo "       CZ_SHADER_DUMP=~/ucode ./cw_runtime        # play to the title screen"
-          echo "       tools/build_shader_spv.sh ~/ucode"
-          echo "       CW_SHADER_SPV=$PWD/assets/shader_spv \\"
-          echo "       CW_PPC_DIR=$PWD/ppc tools/android/build_apk.sh"
-          echo "     (build_apk.sh stages CW_SHADER_SPV into the APK's assets and the launcher"
-          echo "      copies it to <root>/assets/shader_spv/ at first run.)"
-          echo
-          echo "  B. Put an arm64 libdxcompiler.so in third_party/android/<abi>/jniLibs/ and"
-          echo "     rebuild: it lands in nativeLibraryDir, which gpu/shader_translator.cpp"
-          echo "     already searches as ExeDir()/libdxcompiler.so. First boot then translates"
-          echo "     in-process — correct, and slow, once."
+          echo "Two vertex shaders have no disc template at all (engine-synthesised, and bound"
+          echo "at boot before any visible frame), so they are ALWAYS first-sight translations."
+          echo "That is why the device DXC line above decides whether this artifact draws, and"
+          echo "why it is built from source: there is no arm64 libdxcompiler.so to download, from"
+          echo "Microsoft or from the dxc-bin mirror XenosRecomp vendors."
           echo "==================================================="

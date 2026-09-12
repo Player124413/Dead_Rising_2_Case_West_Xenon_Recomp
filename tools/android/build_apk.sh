@@ -19,12 +19,15 @@
 #     CW_PPC_DIR=$PWD/ppc tools/android/build_apk.sh
 #
 # Usage:
-#   tools/android/build_apk.sh [--release] [--skip-deps] [--stub-ppc] [--abi arm64-v8a]
+#   tools/android/build_apk.sh [--release] [--skip-deps] [--stub-ppc] [--with-dxc] [--abi ABI]
 #
 #   --release     assembleRelease instead of assembleDebug (signed with cw.keystore if set,
 #                 otherwise with the debug key — see android/app/build.gradle.kts)
-#   --skip-deps   do not build the four dependencies; use whatever is already in third_party/
+#   --skip-deps   do not build the dependencies; use whatever is already in third_party/
 #   --stub-ppc    force the stub image even when a real ppc/ tree exists
+#   --with-dxc    also build libdxcompiler.so for this ABI (tools/android/build_dxc.sh). It is an
+#                 LLVM build and is NOT built by default: a stub-image APK has no shaders to
+#                 translate. A PLAYABLE one cannot draw without it — see build_dxc.sh's header.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -35,12 +38,14 @@ ROOT=$(cd "$HERE/../.." && pwd)
 VARIANT=debug
 SKIP_DEPS=0
 FORCE_STUB=0
+WITH_DXC=0
 ABI=${CW_ABI:-arm64-v8a}
 while [ $# -gt 0 ]; do
     case "$1" in
         --release)   VARIANT=release ;;
         --skip-deps) SKIP_DEPS=1 ;;
         --stub-ppc)  FORCE_STUB=1 ;;
+        --with-dxc)  WITH_DXC=1 ;;
         --abi)       shift; ABI=${1:?--abi needs a value} ;;
         -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
         *) echo "FAIL: unknown argument $1 (try --help)" >&2; exit 1 ;;
@@ -52,6 +57,7 @@ PREBUILT="$ROOT/third_party/android/$ABI"
 SDL2_PREFIX="$PREBUILT/sdl2"
 FFMPEG_PREFIX="$PREBUILT/ffmpeg"
 ADRENO_PREFIX="$PREBUILT/adrenotools"
+DXC_PREFIX="$PREBUILT/dxc"
 SDL_JAVA="$ROOT/third_party/android/sdl-java"
 APP_ASSETS="$ROOT/third_party/android/app-assets"
 
@@ -149,6 +155,17 @@ if [ "$SKIP_DEPS" -eq 0 ]; then
             || echo "    WARNING: adrenotools did not build — continuing WITHOUT custom driver support"
     else
         echo "==> adrenotools present: $ADRENO_PREFIX"
+    fi
+    if [ "$WITH_DXC" -eq 1 ]; then
+        if [ ! -f "$DXC_PREFIX/jniLibs/libdxcompiler.so" ]; then
+            echo; echo "==> DXC (libdxcompiler.so, $ABI) — an LLVM build, the long one"
+            # A failure here IS a stop, unlike adrenotools': the caller asked for it by name with
+            # --with-dxc, and the APK it produces without it boots to a black screen with one
+            # easily-missed log line. Silent degradation was the whole problem.
+            CW_ABI="$ABI" "$HERE/build_dxc.sh" "$DXC_PREFIX"
+        else
+            echo "==> DXC present: $DXC_PREFIX/jniLibs/libdxcompiler.so ($(cat "$DXC_PREFIX/version.txt" 2>/dev/null || echo '?'))"
+        fi
     fi
 else
     echo "==> --skip-deps: using whatever is in $PREBUILT"
@@ -346,6 +363,17 @@ echo "    abi               $ABI"
 echo "    variant           $VARIANT"
 echo "    guest image       $PPC_KIND"
 echo "    custom drivers    $([ -f "$ADRENO_PREFIX/lib/libadrenotools.a" ] && echo "adrenotools linked, hooks packaged" || echo "NOT in this build")"
+if [ -f "$DXC_PREFIX/jniLibs/libdxcompiler.so" ]; then
+    echo "    DXC               libdxcompiler.so packaged ($(( $(stat -c%s "$DXC_PREFIX/jniLibs/libdxcompiler.so") / 1048576 )) MB, $(cat "$DXC_PREFIX/version.txt" 2>/dev/null || echo '?'))"
+    echo "                      shaders translate on the device; the cache builds itself at first run"
+else
+    echo "    DXC               NOT in this build"
+    case "$PPC_KIND" in
+        real*) echo "                      and the guest image is REAL: this APK boots and cannot draw."
+               echo "                      tools/android/build_apk.sh --with-dxc" ;;
+        *)     echo "                      (the stub image never reaches a draw, so this is expected here)" ;;
+    esac
+fi
 echo "    path              $APK"
 echo
 echo "Install it with:"

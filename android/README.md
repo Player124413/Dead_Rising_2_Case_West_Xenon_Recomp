@@ -40,8 +40,10 @@ tools/android/build_apk.sh
 # dependencies already built — one Gradle invocation
 tools/android/build_apk.sh --skip-deps
 
-# an APK that actually PLAYS (needs a ppc/ tree generated from the game's XEX)
-CW_PPC_DIR=$PWD/ppc tools/android/build_apk.sh
+# an APK that actually PLAYS: the real guest image, and the compiler that translates its
+# shaders. --with-dxc is an LLVM build (there is no prebuilt arm64 DXC to download) and is
+# not done by default because the stub-image APK has nothing to translate.
+CW_PPC_DIR=$PWD/ppc tools/android/build_apk.sh --with-dxc
 
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s CaseWest
@@ -60,6 +62,7 @@ four gitignored:
 | static SDL2 + its `org/libsdl/app/*.java` | an APK cannot carry a second SDL, and the Java half version-checks the library |
 | static ffmpeg, LGPL, xma1+xma2 only | the desktop release builds the same thing for the same licensing reason |
 | libadrenotools + its four hook `.so` files | optional; without it there are no custom GPU drivers |
+| `libdxcompiler.so` | not optional for a playable build, and not downloadable: `tools/android/build_dxc.sh` builds DXC from source with the NDK |
 | arm64 XenonUtils / fmt / xxhash | the XEX loader is a static library and is not portable across architectures |
 
 ## The four decisions that look like mistakes and are not
@@ -123,8 +126,12 @@ silent empty-image failure the devkit key causes, and builds an APK whose guest 
 own code. **Prefer the secret**: this repository is public and a dispatch input is recorded on the
 public run page.
 
-It will not have shaders, and cannot — see `docs/android-port-plan.md` §10.1. The job's closing
-summary prints both ways to supply them.
+It builds the shader cache on the runner from the package's own banks and cross-compiles DXC for
+arm64 (`tools/android/build_dxc.sh`, an LLVM build — there is no prebuilt one to download), so the
+artifact draws. The vertex half of the cache is still absent, because it needs
+`tools/release/vs_recipes.bin` and that file is generated from a machine that has run the game;
+`docs/android-port-plan.md` §5.4 and §10.1 carry the argument, and the job's closing summary prints
+what the artifact you just got actually contains.
 
 A release build needs a keystore (`cw.keystore`, `cw.keystorePassword`, `cw.keyAlias`,
 `cw.keyPassword`, never in git). Without one, `assembleRelease` signs with the debug key so the

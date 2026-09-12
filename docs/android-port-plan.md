@@ -236,9 +236,41 @@ anywhere this project can download** — Microsoft's releases ship x86/x64 Linux
 
 With neither, the runtime boots, refuses each translation with one log line, and presents the black
 screen the first-run check exists to prevent — which is why the launcher states the situation rather
-than hiding the row. Building DXC from source for arm64 is possible and is not scripted here: it is
-an LLVM build, it is not on the critical path once a cache exists, and a script that takes an hour
-to produce something a desktop already has is a script nobody runs twice.
+than hiding the row.
+
+**So option 2 is not really optional, and `tools/android/build_dxc.sh` exists because of that.**
+The reasoning that makes a cache alone insufficient is in the runtime's own history: D.1 established
+that the disc's `.vo` objects are *templates* the title patches at bind time, so 0 of 104 runtime
+vertex shaders exist verbatim on disc; `vs_recipes.bin` recovers 102 of them as template-plus-patch,
+and the remaining two are engine-synthesised with no template anywhere — bound at boot, before any
+visible frame. Those two can only ever come from translate-on-first-sight, i.e. from DXC on the
+device. And `vs_recipes.bin` is not in this repository, because `tools/vs_recipes.py` generates it
+from a microcode dump of a machine that has *run* the game; without it all 104 vertex shaders are
+first-sight translations. A phone with no DXC therefore cannot draw a vertex, cache or no cache.
+
+The script pins a release tag (`v1.9.2607`), clones shallow, initialises only the two submodules a
+SPIR-V-only build reads, passes DXC's own `cmake/caches/PredefinedParams.cmake` with `-C` the way
+DXC's docs prescribe, turns every test target off, caps link parallelism at 2 (LLVM's link is the
+memory-hungry step, and an OOM-killed dxcompiler link reports as a compiler crash with no mention of
+memory an hour into a build), and builds the `dxcompiler` target only. Then it verifies what it made
+the way the other four scripts do: ELF machine against the ABI, and `DxcCreateInstance` present in
+the dynamic symbol table — because a library that loads but does not export that one symbol makes
+`LoadDxcOnce` skip the candidate and report "no dxcompiler library found" for a file that is plainly
+there.
+
+Two choices in it worth stating, since both look like defaults:
+
+* **`ANDROID_STL=c++_shared`, not `c++_static`.** The runtime is built against `c++_shared` (AGP's
+  default) and the APK ships one `libc++_shared.so`. A DXC statically linked against its own copy
+  puts a second C++ runtime in one process, which is the classic route to two heaps and an abort
+  inside somebody else's destructor.
+* **The output goes to `<prefix>/jniLibs/`,** which Gradle packages into `lib/<abi>/`, which the
+  framework extracts to `nativeLibraryDir` (`extractNativeLibs` is true anyway for adrenotools),
+  which *is* `HostPaths::ExeDir()` on Android — and `ExeDir()/libdxcompiler.so` is already a search
+  candidate. So the entire integration is the file being there: no `CW_DXC_LIB`, no launcher row, no
+  code that knows about it. `app/build.gradle.kts` warns (not fails) when a *real* guest image is
+  being packaged without it, because that combination boots to a black screen and the stub-image
+  artifact CI builds on every pull request has nothing to translate.
 
 ## 6. Input: touch is the fourth source, not a mode
 
@@ -374,11 +406,20 @@ and libxlive's dependency closure is one more thing to cross-compile before a fi
 ## 10. Building it
 
 ```bash
-tools/android/build_apk.sh                 # everything, from the four dependencies up
+tools/android/build_apk.sh                 # everything, from the dependencies up (stub image)
 tools/android/build_apk.sh --skip-deps     # one Gradle invocation, dependencies already built
-CW_PPC_DIR=$PWD/ppc tools/android/build_apk.sh   # an APK that PLAYS (needs the real ppc/)
+
+# A PLAYABLE one. All three inputs are needed and each is missing for a different reason:
+CW_PPC_DIR=$PWD/ppc \                     # the real guest image (from your XEX, on a machine
+                                           #   that has it — no runner may hold one)
+CW_SHADER_SPV=$PWD/assets/shader_spv \    # the cache, if you have one; skips the pixel-half
+                                           #   translation on the phone at first run
+  tools/android/build_apk.sh --with-dxc    # and the compiler itself: an LLVM build, because no
+                                           #   prebuilt arm64 libdxcompiler.so exists (§5.4)
+
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-adb logcat -s CaseWest
+adb logcat -s CaseWest                     # [shxlate] dxcompiler: ... is the line that says
+                                           #   DXC loaded, and from where
 ```
 
 `build_apk.sh` is the ordering of the steps with the checks between them, so a failure names the
@@ -417,15 +458,21 @@ diagnostic at all**. So the job counts the mapping table afterwards and fails un
 against a documented 58,448 — a second of work that converts the quietest failure in the pipeline
 into a named one.
 
-**What it still cannot give you is shaders**, and this is the one gap no amount of CI closes.
-`assets/shader_spv` is built by `tools/build_shader_spv.sh` from a *microcode dump*, and a dump only
-exists after the runtime has played the game once (`CZ_SHADER_DUMP=<dir>`) — there is nothing in a
-XEX to dump from, and the runtime hashes the bytes its own `IM_LOAD` handler read, so a dump from
-anything else is a total silent cache miss. The alternative is translating on the phone, which needs
-an arm64 `libdxcompiler.so`, and Microsoft ships DXC for x86/x64 Linux only (§5.4). So the artifact
-this job publishes boots, loads the title's own code, reaches the renderer, and refuses every shader
-translation with one log line. Both ways to finish it are printed in the job's closing summary and
-both need a machine that can either run the game once or build LLVM.
+**Shaders are two steps, and they are the difference between an APK that boots and one that draws.**
+§5.4 is the argument; the mechanics here are that the job builds the *cache* on the runner with the
+x86_64 DXC XenosRecomp already vendors, and cross-compiles DXC *itself* for arm64 so the phone can
+translate what the cache does not hold. The cache step is cheap in a way that looks like a trick and
+is not: SPIR-V is architecture-independent and the cache key is the hash of the **microcode**, not of
+the compiler, so what an x86_64 runner writes is exactly what an arm64 device looks up. It runs the
+host runtime's own `--build-shader-cache` CLI branch against the package's
+`data/shaders/deadrisingepilogue-ps.big`, and that branch returns before the guest exists — so the
+host binary is linked against the *stub* image and the pass still produces a real cache. Linking the
+58k-function image there would cost an hour to build a binary that never calls into it.
+
+The vertex half is still missing, and honestly so: it needs `tools/release/vs_recipes.bin`, which is
+not in this repository (§5.4). The job reports that rather than failing, because the consequence is
+the session-one pop-in part 102 removed for desktop — a real cost, named, rather than a red X over
+an artifact that works.
 
 The APK is uploaded only when the dispatch's `artifact` choice says so, with `retention-days: 1`, and
 the choice's own label states the consequence — game-derived code in an artifact on a public
@@ -461,7 +508,10 @@ package, and exercises every Android code path this port added. It does not play
 What is *not* proven by anything yet, in the order it will hurt:
 
 1. That a real Adreno driver — Turnip or stock — creates a device against this renderer's `CW_FEAT`
-   list. Everything in §5.3 is reasoning from headers and from what other emulators do.
+   list. Everything in §5.3 is reasoning from headers and from what other emulators do. The same
+   doubt covers `tools/android/build_dxc.sh`: DXC cross-compiles for Android (people build it with
+   the NDK), but no run of that script has produced a library yet, and LLVM's cross-configure is
+   where such a script fails — host TableGen, submodule depth, a linker flag.
 2. That the touch overlay is *usable*. The mapping is checkable; a control that is 66 dp on a 6.7"
    panel and 66 dp on a tablet is a claim about thumbs that nobody has made with a thumb.
 3. That the governor's numbers (0.85 per rung, 3 samples down, 10 up) are right for a phone rather
