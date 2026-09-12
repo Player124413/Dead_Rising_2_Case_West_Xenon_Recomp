@@ -461,12 +461,28 @@ present, all four adrenotools hooks present when adrenotools is in the build, an
 
 ### 10.1 The one build CI can make playable
 
-`.github/workflows/android.yml` has a third job, `playable`, which runs **only** on an explicit
-dispatch and is the only job in this repository that is handed a copy of the game. The reason the
-other two cannot be: no runner may hold copyrighted game data as a matter of course, so they build
-`tools/gen_stub_ppc.py`'s stub and prove compile / link / package / boot. A dispatch is different in
+`.github/workflows/android.yml` has ONE job, `playable`, which runs **only** on an explicit dispatch
+and is the only job in this repository that is handed a copy of the game. It is opt-in by necessity
+rather than by preference: no runner may hold copyrighted game data as a matter of course, so a job
+that runs on every push could only build `tools/gen_stub_ppc.py`'s stub. A dispatch is different in
 kind — one person, their own link, at a moment they chose — which is the line between a repository
 that distributes a game and a repository whose owner built their own copy on rented hardware.
+
+**Two jobs used to sit beside it and were removed: `apk`, which built the stub-image APK on every
+push, and `boot`, which installed it on an x86_64 emulator and ran `--smoke`.** What that cost is
+recorded here and in the workflow's own header, because the absence is invisible in a green tick:
+
+* nothing in `android.yml` runs on a push or a pull request any more. `build.yml` still runs on both
+  and still compile-checks the four Android sources that are inert elsewhere, since they are in the
+  runtime's shared source list — but it builds for the HOST. What no longer happens automatically
+  anywhere is the arm64 cross-compile, the four cross-built dependencies and the packaging;
+* the emulator gate is gone, and it was the only thing in this repository that proved anything about
+  *running* rather than compiling. Nothing replaces it. A green run means an APK was produced, not
+  that it boots.
+
+Both are recoverable from this file's history if the trade stops being worth it; the reason it
+currently is, is that a stub-image APK is a thing one person can build locally in twenty minutes with
+`tools/android/build_apk.sh`, while a playable one needs a runner, a game and four cross-compiles.
 
 It takes the URL as `xex_url` or, preferably, as the `CW_XEX_URL` repository secret, and the
 difference matters more than it looks: **this repository is public, and a `workflow_dispatch` input
@@ -572,25 +588,33 @@ See `android/README.md` for the Gradle-level view and the properties that overri
 
 | | | Status |
 |---|---|---|
-| **A0** | The build: one source list, shared library on Android, four new files compiled everywhere, no linked libvulkan, XLive off, `-msse4.1 -mavx` gated | implemented; proven by `.github/workflows/android.yml`'s `apk` job |
+| **A0** | The build: one source list, shared library on Android, four new files compiled everywhere, no linked libvulkan, XLive off, `-msse4.1 -mavx` gated | implemented; proven only by a dispatched `playable` run since the `apk` job was removed (§10.1) |
 | **A1** | Paths and memory: `CW_ROOT`, `dladdr` exe dir, direct `memfd_create` syscall, `tools/release` fallbacks | implemented; **not yet run on a device** |
-| **A2** | The bridge: `SDL_main`, logcat mirror, JNI callbacks, env contract and its boot-time dump | implemented; proven only by the emulator gate below |
+| **A2** | The bridge: `SDL_main`, logcat mirror, JNI callbacks, env contract and its boot-time dump | implemented; **proven by nothing automated** — the emulator gate that proved it was removed (§10.1), and the JNI contract is verified only by reading both sides against each other |
 | **A3** | The GPU: shadow table, two-phase fill, adrenotools loader choice, BCn patch, SDL's five exported symbols | implemented; **never run against a real Adreno driver** |
 | **A4** | Input: the overlay, the merge, the drift rule, the stuck-button guarantees, the counters | implemented; desktop compile-checked, **no device** |
 | **A5** | The app: launcher, driver import, first-run progress UI, thermal, rumble, touch settings | implemented; **no device** |
 | **A6** | Performance: the ladder, both arms, the pin | implemented; **OWED A MEASUREMENT** — the pin's effect and the ladder's step factor are both unmeasured on real hardware, and `CW_ANDROID_PIN_BIG` is off by default until somebody measures it |
 
-What the CI proves, and it is scoped the same way `build.yml` scopes itself: the sources compile for
-arm64, the runtime links as a shared library, an APK packages with the right contents, the generated
-stubs are current, and — on a push to master — an x86_64 emulator installs it, `GameActivity` starts
-with `--esa cwArguments --smoke`, and logcat contains the harness's own `OK:` line plus `CW_ROOT=`.
-That last gate is the only one that proves anything about *running*, and it is x86_64 because that is
-the only ABI an emulator on a hosted x86_64 runner can execute. It carries `-msse4.1 -mavx` (the
-gate is on `CMAKE_SYSTEM_PROCESSOR`, not on Android), which the emulator's `android64` CPU model
-provides; a runner without AVX would SIGILL, and the log would say so.
+What the CI proves, and it is less than it did. `build.yml` — on a push to master and on every pull
+request — proves the host sources compile and link and that `--smoke` passes against the stub image,
+on Linux and Windows. `android.yml` proves the Android half, but **only when somebody dispatches
+it**, and only up to "an APK was produced": the sources compile for arm64, the runtime links as a
+shared library, the four dependencies cross-build, the generated stubs are current, the artifact
+holds the right contents with `extractNativeLibs` true.
 
-**No runner may hold the game**, so CI's APK carries the stub image: it boots, reports a missing
-package, and exercises every Android code path this port added. It does not play Dead Rising.
+What no longer proves anything anywhere is *running on Android*. The gate that did was an x86_64
+emulator installing the stub APK, starting `GameActivity` with `--esa cwArguments --smoke`, and
+logcat having to contain the harness's own `OK:` line plus `CW_ROOT=`. It was x86_64 because that is
+the only ABI an emulator on a hosted x86_64 runner can execute, and it carried `-msse4.1 -mavx` (the
+gate is on `CMAKE_SYSTEM_PROCESSOR`, not on Android), which the emulator's `android64` CPU model
+provides. It is gone, and milestone **A2** — the whole JNI bridge — is now verified only by reading
+both sides of the contract against each other, which is what §4 records.
+
+**No runner may hold the game**, so the one APK CI can build without a dispatch is the stub image: it
+boots, reports a missing package, and exercises every Android code path this port added. It does not
+play Dead Rising. `tools/android/build_apk.sh` builds the same thing locally in about twenty
+minutes, which is the argument for having deleted the job that did it on a runner.
 
 What is *not* proven by anything yet, in the order it will hurt:
 

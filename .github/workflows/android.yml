@@ -1,55 +1,35 @@
 # The Android build (docs/android-port-plan.md).
 #
-# WHAT A GREEN TICK HERE MEANS, scoped exactly the way build.yml scopes itself:
+# ONE JOB, `playable`, ON DEMAND ONLY. There used to be three: `apk` built a stub-image APK, `boot`
+# installed it on an x86_64 emulator and ran --smoke, and `playable` built the real thing from a URL
+# given at dispatch time. The first two are gone, and what that costs is written down here rather
+# than left to be rediscovered by whoever next wonders why nothing caught a break:
 #
-#   * every Android source in runtime/ COMPILES for arm64 with the NDK's clang — including the
-#     four that are inert everywhere else (cpu/touch_input.cpp, host/android_bridge.cpp,
-#     host/android_perf.cpp, gpu/vk_shadow_android.cpp), which are in the shared source list
-#     precisely so that build.yml compile-checks them too;
-#   * the runtime LINKS as a shared library against a static SDL2, a static LGPL ffmpeg and
-#     arm64 XenonUtils, with no libxlive and no linked libvulkan;
-#   * an APK is produced whose lib/<abi>/ holds libcw_runtime.so and, when adrenotools is in the
-#     build, its four hook libraries, with extractNativeLibs true;
-#   * the two generated stubs are current (XLive's and the Vulkan shadow header);
-#   * on a push to master, the artifact BOOTS: an x86_64 emulator installs it, starts
-#     GameActivity with `--esa cwArguments --smoke`, and logcat has to contain the smoke
-#     harness's own verdict. That last one is the only gate in this file that proves anything
-#     about running rather than compiling, and it is why stdout is mirrored to logcat.
+#   * NOTHING IN THIS FILE RUNS ON A PUSH OR A PULL REQUEST ANY MORE. build.yml still runs on both,
+#     and still compile-checks the four Android sources that are inert everywhere else, because they
+#     are in the runtime's shared source list — but it builds for the HOST, so what is no longer
+#     exercised anywhere automatically is the arm64 cross-compile, the four cross-built dependencies
+#     and the packaging. Those happen only when somebody dispatches this.
+#   * THE EMULATOR GATE IS GONE, and it was the only thing in this repository that proved anything
+#     about RUNNING rather than compiling: an install, a start of GameActivity with
+#     `--esa cwArguments --smoke`, and logcat carrying the harness's own verdict. Nothing replaces
+#     it. A green run here means an APK was produced. It does not mean the APK boots.
 #
-# WHAT IT DOES NOT MEAN. No runner may hold the game, so the guest image is the stub from
-# tools/gen_stub_ppc.py: this APK installs, boots, reports a missing package and exercises every
-# Android code path this port added. It does not play Dead Rising. An APK that plays is the same
-# command with CW_PPC_DIR pointing at a ppc/ tree generated on a machine that has the XEX.
-#
-# THE EMULATOR JOB RUNS ON master AND ON DEMAND, NOT ON EVERY PULL REQUEST, and that is a
-# decision about cost rather than about confidence: it cross-builds all four dependencies a
-# second time for x86_64 and boots an emulator, which is the difference between a ~15-minute
-# check and a ~40-minute one on a workflow whose other job already proves the sources compile
-# and the artifact packages.
-#
-# THE THIRD JOB, `playable`, IS NONE OF THE ABOVE. It runs only on an explicit dispatch, it is
-# the only job in this repository that is given a copy of the game, and it is the only one that
-# can produce an APK somebody could actually play. It is documented at its own head, including
-# the input it cannot satisfy (shaders) and why.
+# WHY ONLY workflow_dispatch. The job needs a URL to a copyrighted executable, and on a push or a
+# pull request there is nobody to supply one and no mechanism to supply it with — the job could only
+# skip. A trigger whose every run is skipped is noise that reads like coverage.
 name: android
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
     inputs:
+      # Every input belongs to the one job. `run_emulator_gate` went with the job it gated: an input
+      # that cannot change anything is a control that lies about being one.
       abi:
         description: "ABI to build"
         type: choice
         default: arm64-v8a
         options: [arm64-v8a, x86_64]
-      run_emulator_gate:
-        description: "Also boot the APK on an x86_64 emulator and run --smoke"
-        type: boolean
-        default: true
-
-      # --- the playable build. See the `playable` job for what these actually buy. ---
       xex_url:
         description: "DIRECT download URL. Give the STFS PACKAGE, not a bare default.xex: the package also carries data/shaders/*.big, which is the only source the shader cache can be built from. Leave empty to use the CW_XEX_URL secret. On a PUBLIC repo this field is visible on the run page."
         type: string
@@ -86,281 +66,16 @@ env:
 
 jobs:
   # -----------------------------------------------------------------------------------------
-  # The artifact: arm64-v8a, which is the only ABI a player's phone can use.
-  # -----------------------------------------------------------------------------------------
-  apk:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: install ninja and unzip
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build unzip
-
-      - name: install Gradle ${{ env.GRADLE_VERSION }}
-        run: |
-          curl -fsSL --retry 3 -o /tmp/gradle.zip \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-          sudo unzip -q /tmp/gradle.zip -d /opt
-          echo "/opt/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
-          /opt/gradle-${GRADLE_VERSION}/bin/gradle --version | head -6
-
-      # The NDK is read from android/gradle.properties rather than hardcoded here: one pin, in
-      # the file the build already reads, and tools/android/_ndk.sh resolves the same value.
-      - name: make sure the pinned NDK is installed
-        run: |
-          NDKV=$(sed -n 's/^cw\.ndkVersion=\(.*\)$/\1/p' android/gradle.properties)
-          echo "pinned NDK: $NDKV"
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
-          if [ ! -d "$SDK/ndk/$NDKV" ]; then
-            echo "installing ndk;$NDKV"
-            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDKV" >/dev/null
-          fi
-          # The platform and build-tools the module compiles against, installed rather than
-          # assumed. A runner image carries whichever platforms were current when it was baked,
-          # and the failure when compileSdk is not one of them is "Failed to find target with hash
-          # string 'android-35'" — a message about a target, in a job that installed an NDK two
-          # steps earlier and looks like it did the Android part already.
-          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-35" "build-tools;35.0.0" >/dev/null
-          echo "ANDROID_NDK_HOME=$SDK/ndk/$NDKV" >> "$GITHUB_ENV"
-
-      - name: clone recompilers at pinned bases and apply local patches
-        run: |
-          git clone --recursive https://github.com/hedge-dev/XenonRecomp ../XenonRecomp
-          git -C ../XenonRecomp checkout $XENON_BASE
-          git -C ../XenonRecomp submodule update --init --recursive
-          git -C ../XenonRecomp apply "$PWD/tools/ci/xenonrecomp-local.patch"
-          git clone https://github.com/hedge-dev/XenosRecomp ../XenosRecomp
-          git -C ../XenosRecomp checkout $XENOS_BASE
-          git -C ../XenosRecomp submodule update --init thirdparty/dxc-bin
-          git -C ../XenosRecomp apply "$PWD/tools/ci/xenosrecomp-local.patch"
-
-      # The four cross-compiled dependencies are the expensive part of this workflow (SDL2 and
-      # ffmpeg from source, adrenotools with its submodule, XenonUtils for arm64) and none of
-      # them depend on this repository's sources — so they are cached on the hashes of the
-      # scripts and versions that produce them. A runtime edit is then one Gradle invocation
-      # instead of twenty minutes of cross-compiling.
-      - name: cache the cross-compiled dependencies
-        id: deps-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            third_party/android/${{ inputs.abi || 'arm64-v8a' }}/sdl2
-            third_party/android/${{ inputs.abi || 'arm64-v8a' }}/ffmpeg
-            third_party/android/${{ inputs.abi || 'arm64-v8a' }}/adrenotools
-            third_party/android/sdl-java
-            ../XenonRecomp/build-android-${{ inputs.abi || 'arm64-v8a' }}
-          key: cw-android-deps-${{ inputs.abi || 'arm64-v8a' }}-${{ hashFiles('tools/android/**', 'android/gradle.properties') }}
-          restore-keys: |
-            cw-android-deps-${{ inputs.abi || 'arm64-v8a' }}-
-
-      - name: build the APK
-        run: |
-          # Through tools/ci/run_logged.sh, like every other long command in this workflow: it tees
-          # to the same apk-build.log AND, if the build fails, publishes its tail as an annotation.
-          # Logs and artifacts are blob-backed and unreachable through the public API; annotations
-          # are not. Without one, a red step here is a red square with no text behind it anywhere.
-          tools/ci/run_logged.sh apk-build.log \
-            tools/android/build_apk.sh --abi "${{ inputs.abi || 'arm64-v8a' }}"
-
-      # What the artifact contains, published whether the build passed or not: a red step whose
-      # error text is unreachable cannot be iterated on, and this repo's sessions read CI through
-      # the public API, which serves step verdicts but not step logs (build.yml learned that the
-      # hard way on its Windows job).
-      - name: describe the artifact
-        if: always()
-        run: |
-          APK=$(find android/app/build/outputs/apk -name '*.apk' | head -1 || true)
-          if [ -n "$APK" ]; then
-            echo "=== $APK ($(stat -c%s "$APK") bytes) ==="
-            unzip -l "$APK" | sed -n '1,60p'
-          else
-            echo "no APK was produced"
-          fi
-
-      - name: publish the logs the API cannot serve
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-build-logs
-          if-no-files-found: ignore
-          path: |
-            apk-build.log
-            android/app/build/**/*.log
-            /var/tmp/cw-sdl2-android/build-*/configure.log
-            /var/tmp/cw-ffmpeg-android/build-*/configure.log
-            /var/tmp/cw-adrenotools/build-*/configure.log
-
-      - name: upload the APK
-        uses: actions/upload-artifact@v4
-        with:
-          # Named for what it is: a stub-image build. An artifact called "casewest.apk" that
-          # somebody installs expecting a game is a support request waiting to happen.
-          name: casewest-android-stub-image-apk
-          path: android/app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
-
-  # -----------------------------------------------------------------------------------------
-  # The gate that proves it RUNS. x86_64, because that is the only ABI an emulator on a
-  # GitHub-hosted x86_64 runner can execute; the arm64 artifact above is the one that ships.
-  # -----------------------------------------------------------------------------------------
-  boot:
-    # push: always. pull_request: never (see the cost note above). dispatch: only when the box is
-    # ticked — the input existed before this condition did, and an input that cannot change
-    # anything is a control that lies about being one.
-    if: >-
-      github.event_name != 'pull_request' &&
-      (github.event_name != 'workflow_dispatch' || inputs.run_emulator_gate)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: install ninja and unzip
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build unzip
-
-      - name: install Gradle ${{ env.GRADLE_VERSION }}
-        run: |
-          curl -fsSL --retry 3 -o /tmp/gradle.zip \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-          sudo unzip -q /tmp/gradle.zip -d /opt
-          echo "/opt/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
-
-      - name: make sure the pinned NDK is installed
-        run: |
-          NDKV=$(sed -n 's/^cw\.ndkVersion=\(.*\)$/\1/p' android/gradle.properties)
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
-          [ -d "$SDK/ndk/$NDKV" ] || yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDKV" >/dev/null
-          # Same as the apk job: install the platform compileSdk names rather than trusting the
-          # runner image to have been baked with it.
-          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-35" "build-tools;35.0.0" >/dev/null
-          echo "ANDROID_NDK_HOME=$SDK/ndk/$NDKV" >> "$GITHUB_ENV"
-
-      - name: clone recompilers at pinned bases and apply local patches
-        run: |
-          git clone --recursive https://github.com/hedge-dev/XenonRecomp ../XenonRecomp
-          git -C ../XenonRecomp checkout $XENON_BASE
-          git -C ../XenonRecomp submodule update --init --recursive
-          git -C ../XenonRecomp apply "$PWD/tools/ci/xenonrecomp-local.patch"
-          git clone https://github.com/hedge-dev/XenosRecomp ../XenosRecomp
-          git -C ../XenosRecomp checkout $XENOS_BASE
-          git -C ../XenosRecomp submodule update --init thirdparty/dxc-bin
-          git -C ../XenosRecomp apply "$PWD/tools/ci/xenosrecomp-local.patch"
-
-      - name: cache the x86_64 dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            third_party/android/x86_64/sdl2
-            third_party/android/x86_64/ffmpeg
-            third_party/android/sdl-java
-            ../XenonRecomp/build-android-x86_64
-          key: cw-android-deps-x86_64-${{ hashFiles('tools/android/**', 'android/gradle.properties') }}
-          restore-keys: cw-android-deps-x86_64-
-
-      # adrenotools is arm64-only and is expected to fail here; build_apk.sh treats that as a
-      # warning and continues without custom driver support, which is exactly the degradation
-      # gpu/vk_shadow_android.cpp is written for.
-      - name: build the x86_64 APK
-        run: |
-          tools/ci/run_logged.sh apk-build-x86_64.log tools/android/build_apk.sh --abi x86_64
-
-      - name: enable KVM
-        run: |
-          # The emulator needs /dev/kvm and the runner's user is not in the kvm group. Without
-          # this the boot takes ten minutes of software emulation and the job times out looking
-          # like a hung app rather than a missing permission.
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: boot the APK and run --smoke
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          target: google_apis
-          # No window, no audio, no boot animation: nothing in this gate looks at pixels, and
-          # each of the three is a way for a headless runner to be slow.
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -accel on
-          disable-animations: true
-          script: |
-            set -e
-            APK=$(find android/app/build/outputs/apk -name '*.apk' | head -1)
-            echo "=== installing $APK ==="
-            adb install -r "$APK"
-
-            adb logcat -c
-            echo "=== starting GameActivity with --smoke ==="
-            # The arguments reach SDL_main through GameActivity.getArguments(), which reads this
-            # extra — the one way to give an Android app a command line. CwRuntimeMain's first
-            # statement is the --smoke branch, so this runs exactly the gate build.yml runs.
-            adb shell am start -n dev.casewest.android/.GameActivity --esa cwArguments "--smoke"
-
-            echo "=== waiting for the harness's verdict ==="
-            # The verdict is a printf, which is why stdout is mirrored to logcat alongside
-            # stderr: on a platform where stdout is /dev/null, a gate that prints its answer to
-            # nowhere is a gate that always looks like it hung.
-            for i in $(seq 1 60); do
-              if adb logcat -d -s CaseWest SDL AndroidRuntime | grep -qE \
-                 'every generated symbol resolved|FAIL:|FATAL EXCEPTION|no Vulkan loader'; then
-                break
-              fi
-              sleep 5
-            done
-
-            adb logcat -d -s CaseWest SDL AndroidRuntime DEBUG > smoke.log
-            echo "=== logcat ==="
-            cat smoke.log
-
-            echo "=== asserting ==="
-            # The positive assertion first, and the negative one second, because "no FAIL" would
-            # also be true of an app that never started.
-            grep -q 'OK: every generated symbol resolved' smoke.log \
-              || { echo "FAIL: the smoke harness did not report success. If the log is empty the" \
-                         "app never reached SDL_main — look for a broken-library or an" \
-                         "UnsatisfiedLinkError line above."; exit 1; }
-            ! grep -q 'FATAL EXCEPTION' smoke.log \
-              || { echo "FAIL: the app crashed."; exit 1; }
-            grep -q 'CW_ROOT=' smoke.log \
-              || { echo "FAIL: CW_ROOT was never exported — the launcher's environment did not" \
-                         "reach the runtime."; exit 1; }
-
-      - name: publish the boot logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-boot-logs
-          if-no-files-found: ignore
-          path: |
-            smoke.log
-            apk-build-x86_64.log
-
-  # -----------------------------------------------------------------------------------------
   # THE PLAYABLE BUILD — the only job in this repository that puts the real guest image in an
   # artifact, and therefore the only one that needs a copy of the game.
   #
-  # It exists because the two other jobs are capped by a rule that cannot be relaxed: no runner
-  # may hold copyrighted game data as a matter of course, so `apk` and `boot` build the stub from
-  # tools/gen_stub_ppc.py and prove compile / link / package / boot. This job is opt-in, one
-  # person's own dispatch, with the URL supplied by that person at that moment — which is the
-  # difference between a repository that distributes a game and a repository whose owner built
-  # their own copy on rented hardware.
+  # It is opt-in by necessity rather than by preference: no runner may hold copyrighted game data as
+  # a matter of course, so this is one person's own dispatch, with the URL supplied by that person at
+  # that moment — the difference between a repository that distributes a game and a repository whose
+  # owner built their own copy on rented hardware. The two stub-image jobs that used to sit beside
+  # it, proving compile / link / package / boot against tools/gen_stub_ppc.py, are gone; what they
+  # proved about COMPILING is build.yml's job now, and what they proved about BOOTING nothing
+  # proves. See the head of this file for what that costs.
   #
   # WHAT IT DOES: download default.xex (or the STFS package, which it unpacks), generate ppc/
   # with the PATCHED host XenonRecomp, verify the generation actually happened, cross-compile the
@@ -390,7 +105,9 @@ jobs:
   # correct DXC, and every shader is then translated on the phone at first sight instead.
   # -----------------------------------------------------------------------------------------
   playable:
-    if: github.event_name == 'workflow_dispatch'
+    # No `if` here. workflow_dispatch is the only trigger this file has, so a condition testing for
+    # it could not be false, and a guard that cannot fire is one a reader has to reason about to
+    # discover it does nothing.
     runs-on: ubuntu-latest
     # 360 is GitHub's CEILING for a job on a hosted runner, not a guess, and this job can reach it:
     # generating 58k functions, compiling 228 arm64 translation units of them, translating ~1,265

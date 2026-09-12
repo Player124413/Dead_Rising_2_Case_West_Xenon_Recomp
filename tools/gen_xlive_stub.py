@@ -30,7 +30,11 @@ WHY IT IS GENERATED
 -------------------
 Forty functions across five headers, and every one of them has to match its
 declaration exactly or the link fails with an undefined symbol that names a function
-the stub plainly defines. A hand-written stub is a stub that stops matching the day a
+the stub plainly defines. The mirror image is also a link failure and is easier to
+miss: a declaration whose definition the KERNEL owns in both configurations must not
+be stubbed, or every CW_XLIVE=OFF build fails with `multiple definition of`. Those are
+listed in KERNEL_OWNS with their reasons, and the script refuses to write a stub that
+collides with any other source in the OFF build. A hand-written stub is a stub that stops matching the day a
 header gains a parameter. This script copies each signature VERBATIM from the headers
 and the generated file INCLUDES those headers, so the compiler is the gate: a
 signature that drifts is a compile error in the stub, not a link error in a build
@@ -59,9 +63,92 @@ import argparse
 import os
 import re
 import sys
+import textwrap
 
 HEADERS = ["xlive_glue.h", "xlive_session.h", "xlive_social.h", "xlive_stats.h",
            "xlive_net.h"]
+
+# Declarations in those headers whose DEFINITION the kernel owns whether or not libxlive is linked,
+# and which this stub must therefore not emit.
+#
+# Emitting one is invisible at every gate that already exists. The signature cannot drift, because
+# it is copied verbatim and the header is included — that is the whole design. --check cannot catch
+# it, because --check compares this script's output against itself. It surfaces as
+# `multiple definition of` at the link of every CW_XLIVE=OFF build, which is to say in CI, in a job
+# that has already spent twenty minutes generating a guest image. It did exactly that.
+KERNEL_OWNS = {
+    "PostGuestNotification":
+        "runtime/kernel/imports.cpp. The notification listeners are kernel objects created by "
+        "XamNotifyCreateListener and queued under the kernel lock, so the delivery function is "
+        "kernel code; xlive_social.h declares it only because the Live layer posts through it. "
+        "imports.cpp is in the build in both configurations, so a definition here is a second one.",
+}
+
+# The sources CW_XLIVE=ON compiles instead of the stub. A name defined in one of these is NOT a
+# collision, because in an OFF build the file is not in the build; XliveNet_Enabled and
+# XliveNet_SelfTest are declared in xlive_net.h and defined in xlive_net.cpp, and the stub is the
+# only definition an OFF build has. Every other runtime source is built in both configurations.
+XLIVE_ON_SOURCES = frozenset(["xlive_glue.cpp", "xlive_session.cpp", "xlive_social.cpp",
+                              "xlive_stats.cpp", "xlive_net.cpp"])
+
+# A definition, as opposed to a declaration or a call: a signature at the start of a line whose
+# body opens on the same line or the next one. Good enough to be a tripwire, and it is used only
+# to compare against names this script is about to emit.
+_DEF_RE = re.compile(r'^[A-Za-z_][\w:<>,\s\*&]*?\b(\w+)\s*\([^;{]*\)\s*\n?\{', re.M)
+_KEYWORDS = frozenset(["if", "for", "while", "switch", "return", "catch", "sizeof"])
+
+
+def names_defined_in(runtime_root, out_name):
+    """{function name: [files]} for every runtime source built when CW_XLIVE=OFF."""
+    found = {}
+    for dirpath, _dirnames, files in os.walk(runtime_root):
+        for fn in sorted(files):
+            if not fn.endswith(('.cpp', '.c')) or fn == out_name or fn in XLIVE_ON_SOURCES:
+                continue
+            path = os.path.join(dirpath, fn)
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = strip_comments(f.read())
+            for name in _DEF_RE.findall(text):
+                if name not in _KEYWORDS:
+                    found.setdefault(name, []).append(path)
+    return found
+
+
+def emitted_count(decls_by_header):
+    """How many functions the stub will define — declarations minus the ones the kernel owns.
+
+    Reported instead of the declaration count because the two differ, and a script that prints 41
+    next to a file whose banner says 40 invites exactly the doubt the number is there to remove."""
+    n = 0
+    for decls in decls_by_header.values():
+        for decl in decls:
+            if split_signature(decl)[1] not in KERNEL_OWNS:
+                n += 1
+    return n
+
+
+def check_collisions(decls_by_header, runtime_root, out_name):
+    """Fail if the stub is about to define something the OFF build already defines."""
+    emitted = set()
+    for decls in decls_by_header.values():
+        for decl in decls:
+            name = split_signature(decl)[1]
+            if name not in KERNEL_OWNS:
+                emitted.add(name)
+    defined = names_defined_in(runtime_root, out_name)
+    hits = sorted(n for n in emitted if n in defined)
+    if not hits:
+        return 0
+    print('gen_xlive_stub: the stub would define %d function(s) that the CW_XLIVE=OFF build '
+          'already defines, which is `multiple definition of` at link time:' % len(hits),
+          file=sys.stderr)
+    for n in hits:
+        print('    %-34s also defined in %s' % (n, ', '.join(sorted(set(defined[n])))),
+              file=sys.stderr)
+    print('  If the kernel owns it in both configurations, add it to KERNEL_OWNS above with the '
+          'reason; if the stub should own it, remove the definition from that source.',
+          file=sys.stderr)
+    return 1
 
 # Lines that begin a construct which is not a free function declaration. Everything else
 # at brace depth 0 that ends in `);` and contains a `(` is a declaration.
@@ -191,6 +278,7 @@ def render(decls_by_header):
     out.append('#include <cstdio>')
     out.append('')
     total = 0
+    skipped = 0
     for header in HEADERS:
         decls = decls_by_header.get(header, [])
         if not decls:
@@ -198,6 +286,17 @@ def render(decls_by_header):
         out.append('// --- %s %s' % (header, '-' * max(0, 66 - len(header))))
         for decl in decls:
             ret, name, args = split_signature(decl)
+            if name in KERNEL_OWNS:
+                # The kernel defines this one whether or not libxlive is linked; see KERNEL_OWNS.
+                # Wrapped because the reason is the point of the line: a reader who wonders why a
+                # declared function has no stub should get the answer here, in the file they are
+                # reading, and not have to go and find the script.
+                out.extend(textwrap.fill(
+                    '%s is NOT stubbed here: %s' % (name, KERNEL_OWNS[name]),
+                    width=100, initial_indent='// ', subsequent_indent='// ').split('\n'))
+                out.append('')
+                skipped += 1
+                continue
             total += 1
             arglist = args if args else ''
             out.append('%s %s(%s)' % (ret, name, arglist))
@@ -222,8 +321,10 @@ def render(decls_by_header):
             out.append('}')
             out.append('')
     text = '\n'.join(out).rstrip() + '\n'
-    return text.replace('__COUNT__',
-                        '\n// %d functions, copied verbatim from the headers above.' % total)
+    note = '\n// %d functions, copied verbatim from the headers above.' % total
+    if skipped:
+        note += '\n// %d declared but not stubbed, because the kernel defines them either way.' % skipped
+    return text.replace('__COUNT__', note)
 
 
 def main():
@@ -246,6 +347,12 @@ def main():
         with open(path, encoding='utf-8') as f:
             decls_by_header[header] = parse_declarations(f.read())
 
+    # Before writing anything: the collision that this stub cannot detect about itself. Run in both
+    # modes, because a stub that is CURRENT and colliding is the state CI was in.
+    runtime_root = os.path.dirname(os.path.abspath(args.kernel))
+    if check_collisions(decls_by_header, runtime_root, args.out):
+        return 1
+
     text = render(decls_by_header)
     out = os.path.join(args.kernel, args.out)
 
@@ -256,7 +363,7 @@ def main():
                 old = f.read()
         if old == text:
             print('gen_xlive_stub: %s is current (%d functions)'
-                  % (args.out, sum(len(v) for v in decls_by_header.values())))
+                  % (args.out, emitted_count(decls_by_header)))
             return 0
         print('gen_xlive_stub: %s IS STALE. Run:\n    python3 tools/gen_xlive_stub.py\n'
               'A stale stub is an undefined symbol at link time in every CW_XLIVE=OFF '
@@ -265,8 +372,7 @@ def main():
 
     with open(out, 'w', encoding='utf-8') as f:
         f.write(text)
-    print('gen_xlive_stub: wrote %s (%d functions)'
-          % (out, sum(len(v) for v in decls_by_header.values())))
+    print('gen_xlive_stub: wrote %s (%d functions)' % (out, emitted_count(decls_by_header)))
     return 0
 
 

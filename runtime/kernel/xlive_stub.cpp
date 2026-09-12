@@ -17,7 +17,8 @@
 // The signatures below are copied verbatim from the headers, and the headers are included,
 // so a declaration that drifts is a compile error HERE rather than an undefined symbol in
 // somebody's link. 
-// 41 functions, copied verbatim from the headers above.
+// 40 functions, copied verbatim from the headers above.
+// 1 declared but not stubbed, because the kernel defines them either way.
 
 #include "xlive_glue.h"
 #include "xlive_session.h"
@@ -176,10 +177,11 @@ void XliveSocial_SelfTest()
 {
 }
 
-bool PostGuestNotification(uint32_t id, uint32_t param)
-{
-    return false;
-}
+// PostGuestNotification is NOT stubbed here: runtime/kernel/imports.cpp. The notification listeners
+// are kernel objects created by XamNotifyCreateListener and queued under the kernel lock, so the
+// delivery function is kernel code; xlive_social.h declares it only because the Live layer posts
+// through it. imports.cpp is in the build in both configurations, so a definition here is a second
+// one.
 
 // --- xlive_stats.h -----------------------------------------------------
 void XliveStats_Start()
