@@ -306,6 +306,11 @@ jobs:
           # else in that file matches it.
           N=$(grep -c '0x8[0-9A-Fa-f]\{7\}' "$MAP" || true)
           echo "mapping entries referencing guest addresses: $N (this title is documented at 58,448 functions)"
+          # Published as an annotation as well as printed, because the numbers a run produces are the
+          # thing worth knowing from it and the step log is not reachable through the public API —
+          # only verdicts and annotations are. A count that is only printed is a count nobody can read
+          # after the run, which is the same defect as a failure that is only printed.
+          echo "::notice::guest image: $N mapping entries reference guest addresses (documented expectation 58,448 functions)"
           if [ "$N" -lt 40000 ]; then
             echo "::error::Only $N entries. That is the signature of an image XenonRecomp could not"
             echo "::error::decrypt — almost certainly the XEX key. config/CaseWest.toml records that"
@@ -479,7 +484,17 @@ jobs:
             echo "translation on the phone, which works only if the device DXC line above is not"
             echo "NONE, and is slow the first time it happens."
           else
-            echo "That cache travels inside the APK. tools/release/vs_recipes.bin is tracked in"
+            # One annotation carrying what this run actually produced, for the same reason as the
+          # guest-image count above: verdicts and annotations are served by the public API, step logs
+          # and artifacts are not. This step runs `if: always()`, so the summary exists on a failed
+          # run too — which is when knowing how far it got matters most.
+          APK=$(find android/app/build/outputs/apk -name '*.apk' 2>/dev/null | head -1 || true)
+          APKDESC="none — the build did not get as far as packaging"
+          [ -n "$APK" ] && APKDESC="$(stat -c%s "$APK") bytes"
+          DXCDESC="ABSENT, so shaders cannot be translated on the phone"
+          [ -n "$DXC" ] && DXCDESC="present"
+          echo "::notice title=what this run produced::abi=${{ inputs.abi }}; shader cache=${SPV} module(s), where the pixel half is documented at 1,265 and the vertex half at 102 of 104; device DXC ${DXCDESC}; APK ${APKDESC}"
+          echo "That cache travels inside the APK. tools/release/vs_recipes.bin is tracked in"
             echo "this repository, so the pass covered the VERTEX half too: 102 of the 104"
             echo "runtime vertex shaders are template+patch, recovered from the disc bank."
             echo "Expect roughly 1,265 pixel modules plus 102 vertex ones in the count above."
