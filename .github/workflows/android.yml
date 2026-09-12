@@ -413,18 +413,45 @@ jobs:
             echo "::warning::vertex shaders will be translated on the phone at first sight."
           fi
 
-      - name: cache the cross-compiled dependencies
-        uses: actions/cache@v4
+      # TWO caches rather than one, and restore/save rather than actions/cache, for two reasons that
+      # both cost real minutes in a debug loop.
+      #
+      # The key used to be hashFiles('tools/android/**'), so fixing anything in that directory —
+      # including a script for a dependency that had nothing to do with the fix — discarded the
+      # cached SDL2, ffmpeg, adrenotools and XenonRecomp archives and rebuilt all four. Each
+      # dependency is now keyed on its own script plus _ndk.sh, which every one of them sources, plus
+      # gradle.properties, which pins the NDK they all build against.
+      #
+      # And actions/cache does not save when the job fails, which in a loop where most runs fail
+      # meant nothing was ever cached: the run that got seventeen steps deep saved nothing at all.
+      # Splitting into restore and save with `if: always()` on the save is the documented pattern, and
+      # it is safe here rather than merely convenient — build_apk.sh decides whether to build a
+      # dependency by testing for its finished artifact (lib/libSDL2.a, lib/libavcodec.a,
+      # XenonUtils/libXenonUtils.a, jniLibs/libdxcompiler.so), and those are written by the install
+      # step at the END of each build, so a prefix restored from a run that died is either complete or
+      # missing its artifact and rebuilt. continue-on-error because saving a key that already exists
+      # is a failure that means the cache is there, which is what was wanted.
+      - name: restore the cross-built dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             third_party/android/${{ inputs.abi }}/sdl2
             third_party/android/${{ inputs.abi }}/ffmpeg
             third_party/android/${{ inputs.abi }}/adrenotools
-            third_party/android/${{ inputs.abi }}/dxc
             third_party/android/sdl-java
             ../XenonRecomp/build-android-${{ inputs.abi }}
-          key: cw-android-deps-${{ inputs.abi }}-${{ hashFiles('tools/android/**', 'android/gradle.properties') }}
+          key: cw-android-deps-${{ inputs.abi }}-${{ hashFiles('tools/android/build_sdl2_android.sh', 'tools/android/build_ffmpeg_android.sh', 'tools/android/build_adrenotools.sh', 'tools/android/build_xenon_android.sh', 'tools/android/_ndk.sh', 'tools/ci/xenonrecomp-local.patch', 'android/gradle.properties') }}
           restore-keys: cw-android-deps-${{ inputs.abi }}-
+
+      # DXC apart from the rest: it is an LLVM build and by far the longest step in this job, so the
+      # one thing worth never rebuilding is the one thing a shared key would throw away most often.
+      - name: restore the cross-built DXC
+        id: dxc-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/android/${{ inputs.abi }}/dxc
+          key: cw-android-dxc-${{ inputs.abi }}-${{ hashFiles('tools/android/build_dxc.sh', 'tools/android/_ndk.sh', 'android/gradle.properties') }}
 
       - name: build the APK from the real image
         run: |
@@ -464,6 +491,27 @@ jobs:
           # make that private; the only lever is how long the window is, so it is as short as
           # GitHub allows while still being usable.
           retention-days: 1
+
+      - name: save the cross-built dependencies, including after a failure
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            third_party/android/${{ inputs.abi }}/sdl2
+            third_party/android/${{ inputs.abi }}/ffmpeg
+            third_party/android/${{ inputs.abi }}/adrenotools
+            third_party/android/sdl-java
+            ../XenonRecomp/build-android-${{ inputs.abi }}
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+
+      - name: save DXC, including after a failure
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: third_party/android/${{ inputs.abi }}/dxc
+          key: ${{ steps.dxc-cache.outputs.cache-primary-key }}
 
       - name: what this artifact is, and what it still needs
         if: always()
